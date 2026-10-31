@@ -15,6 +15,23 @@ Anything is possible; the quality may vary depending on the language model used.
 
 You determine the duration of the presentation—whether it’s intended for children, designed to help with falling asleep, or simply meant for entertainment or education.
 
+## How a talk is made
+
+- **Story or knowledge:** at the start the AI decides whether the topic asks for a told *story* or for *knowledge*.
+  Each kind follows its own guideline – story: opening, introduction, middle part, rising tension, climax, **one**
+  twist, happy end; knowledge: hook, basics, deeper details, tension, climax, one surprising turn, conclusion.
+- **Story bible:** the outline comes with the whole plot (or the red thread), the recurring characters with their look,
+  and the one planned twist. Every slide and the editor see it, so the story stays coherent and logical.
+- **Editor pass:** the loaded language model (e.g. `qwen3.8-9b-distill`) writes outline and slides; a second pass
+  checks every one for contradictions, logic and – in stories – consistency with the story bible.
+- **Picture style:** photorealistic, watercolour, anime or your own (free text). One seed per talk keeps the style
+  consistent; recurring characters get a reference picture (FLUX.2 *ReferenceLatent*) so they look the same on every
+  slide.
+- **Picture effects** (as in the Dopewars project): 2.5D depth parallax (Depth Anything V2 Small, on the CPU), a slow
+  camera move per slide (Ken Burns), flickering glow on lamps, film grain and vignette, plus weather and mood effects
+  chosen per slide: snow, rain, drizzle, thunderstorm, stars, sparks, fire, smoke, fog, bubbles, fireflies, confetti,
+  glitter, fireworks, autumn leaves, blossoms, sunbeams, dust, hearts.
+
 You decide whether to include visual effects and music.
 
 You can even have music generated specifically for your presentation—the system attempts to identify the musical style that best suits your content.
@@ -50,6 +67,7 @@ diashow/
 │   ├── web/index.html      Landing page and projector view
 │   ├── tts_dienst.py       Qwen3 TTS speech service (port 8431, qwen-tts-venv)
 │   ├── erzaehler.py, tts_schnell.py   Speech processing + acceleration (from the role-playing game system)
+│   ├── tiefe.py            Depth masks (2.5D) and lamp positions per picture (runs with ComfyUI's Python)
 │   └── stimmen/            Reference recordings for the five speakers
 ├── musik/                  Background music (included in the installation)
 └── sounds/                 Ambient sounds – `<type>_<number>.flac` (included in the installation)

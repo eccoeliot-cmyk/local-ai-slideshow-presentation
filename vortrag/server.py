@@ -292,9 +292,17 @@ def comfy_sicherstellen(abbruch: threading.Event | None = None) -> bool:
     return False
 
 
-def workflow_bauen(prompt: str, seed: int, groesse: tuple[int, int] = BILD_GROESSE) -> dict:
+REFERENZ_MEGAPIXEL = 0.4   # Referenzbilder klein halten: jedes verlängert die Rechenzeit des Dias
+REFERENZ_PERSONEN = 3      # höchstens so viele Figuren bekommen ein Referenzbild (je ~10 s beim Aufwärmen)
+REFERENZEN_JE_DIA = 2
+
+
+def workflow_bauen(prompt: str, seed: int, groesse: tuple[int, int] = BILD_GROESSE,
+                   referenzen: list[str] | None = None) -> dict:
+    """FLUX.2 [klein]. referenzen = Dateinamen in ComfyUIs input-Ordner (Figuren-Referenzbilder, Wunsch des Nutzers
+    2026-10-31): sie hängen per ReferenceLatent an der Bedingung, damit dieselbe Figur auf jedem Dia gleich aussieht."""
     b, h = groesse
-    return {
+    wf = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": MODELL["unet"], "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": MODELL["clip"], "type": "flux2", "device": "default"}},
         "3": {"class_type": "VAELoader", "inputs": {"vae_name": MODELL["vae"]}},
@@ -313,16 +321,42 @@ def workflow_bauen(prompt: str, seed: int, groesse: tuple[int, int] = BILD_GROES
         # Ergebnis, dessen Datei wir schon aufgeräumt haben (/view -> 404, gemessen 2026-10-20)
         "13": {"class_type": "SaveImage", "inputs": {"filename_prefix": f"diashow_{uuid.uuid4().hex[:8]}", "images": ["12", 0]}},
     }
+    pos, neg = ["4", 0], ["5", 0]
+    for i, name in enumerate(referenzen or []):
+        n = 20 + i * 5
+        wf[str(n)] = {"class_type": "LoadImage", "inputs": {"image": name}}
+        wf[str(n + 1)] = {"class_type": "ImageScaleToTotalPixels", "inputs": {
+            "image": [str(n), 0], "upscale_method": "lanczos", "megapixels": REFERENZ_MEGAPIXEL, "resolution_steps": 1}}
+        wf[str(n + 2)] = {"class_type": "VAEEncode", "inputs": {"pixels": [str(n + 1), 0], "vae": ["3", 0]}}
+        wf[str(n + 3)] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": pos, "latent": [str(n + 2), 0]}}
+        wf[str(n + 4)] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": neg, "latent": [str(n + 2), 0]}}
+        pos, neg = [str(n + 3), 0], [str(n + 4), 0]
+    wf["10"]["inputs"]["positive"], wf["10"]["inputs"]["negative"] = pos, neg
+    return wf
 
 
-def bild_erzeugen(prompt: str, seed: int, ziel: Path, vortrag: "Vortrag", groesse: tuple[int, int] = BILD_GROESSE) -> bool:
+def comfy_hochladen(quelle: Path, name: str) -> str:
+    """Bild in ComfyUIs input-Ordner legen (für LoadImage). -> Dateiname dort"""
+    grenze = uuid.uuid4().hex
+    body = (f"--{grenze}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"{name}\"\r\n"
+            f"Content-Type: image/png\r\n\r\n").encode() + quelle.read_bytes() + (
+            f"\r\n--{grenze}\r\nContent-Disposition: form-data; name=\"overwrite\"\r\n\r\ntrue\r\n--{grenze}--\r\n").encode()
+    req = urllib.request.Request(f"{COMFYUI_URL}/upload/image", data=body,
+                                 headers={"Content-Type": f"multipart/form-data; boundary={grenze}"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())["name"]
+
+
+def bild_erzeugen(prompt: str, seed: int, ziel: Path, vortrag: "Vortrag", groesse: tuple[int, int] = BILD_GROESSE,
+                  referenzen: list[str] | None = None) -> bool:
     """Schickt den Graphen an ComfyUI, wartet auf das Bild und legt es unter ziel ab. False bei Abbruch."""
     with GPU.frei("bild"):
-        return _bild_erzeugen(prompt, seed, ziel, vortrag, groesse)
+        return _bild_erzeugen(prompt, seed, ziel, vortrag, groesse, referenzen)
 
 
-def _bild_erzeugen(prompt: str, seed: int, ziel: Path, vortrag: "Vortrag", groesse: tuple[int, int]) -> bool:
-    pid = _http_json(f"{COMFYUI_URL}/prompt", {"prompt": workflow_bauen(prompt, seed, groesse),
+def _bild_erzeugen(prompt: str, seed: int, ziel: Path, vortrag: "Vortrag", groesse: tuple[int, int],
+                   referenzen: list[str] | None = None) -> bool:
+    pid = _http_json(f"{COMFYUI_URL}/prompt", {"prompt": workflow_bauen(prompt, seed, groesse, referenzen),
                                                "client_id": vortrag.id})["prompt_id"]
     vortrag.comfy_ids.add(pid)
     try:
@@ -487,17 +521,161 @@ def qwen_json(system: str, nutzer: str, felder: dict, temperatur: float = 0.8, m
 
 TEXT = {"type": "string"}
 
+# Art des Vortrags (Wunsch des Nutzers 2026-10-31): Wissensvermittlung oder erzählte Geschichte – die KI entscheidet am
+# Anfang, und für beide gibt es eine Richtschnur (Phasen), an der sich Gliederung, jedes Dia und der Lektor ausrichten.
+ART_SYSTEM = """You decide what kind of illustrated slide talk fits a topic. Answer only with JSON:
+- "art": "geschichte" if the audience wants a STORY to be told: a fairy tale, an adventure, a fable, a made-up tale
+  about characters ("a dragon who is afraid of fire", "erzähl eine Geschichte über …", "a bedtime story", "a mystery in
+  a castle"); "wissen" if the talk should EXPLAIN or inform about a real subject: history, science, nature, places,
+  people, technology, how things work. Careful: "the history of coffee" or "die Geschichte des Fußballs" is KNOWLEDGE
+  (history), not a story. Biographies and real events are knowledge."""
+
+# Richtschnur je Art: Phase -> Aufgabe des Dias (englisch – Anweisung ans Modell). Reihenfolge = Ablauf des Vortrags;
+# die ersten zwei Einträge nach dem Anfang und der vor dem Höhepunkt werden je nach Länge mehrfach belegt.
+PHASEN = {
+    "geschichte": {
+        "anfang": "OPENING – a hook: drop the audience into the world of the story, its place and mood; introduce the "
+                  "main character in a memorable first scene.",
+        "einleitung": "INTRODUCTION – who the main character is, what they want or need, and what sets the story in "
+                      "motion.",
+        "mittelteil": "MIDDLE – the journey: attempts, encounters, obstacles; each slide raises the stakes a little. "
+                      "Plant a small, subtle clue that will make sense after the twist – without revealing it.",
+        "spannung": "RISING TENSION – things get difficult and uncertain, the conflict comes to a head, the audience "
+                    "fears for the hero.",
+        "hoehepunkt": "CLIMAX – the decisive moment of the whole story: vivid, pictorial language, strong sentences, the "
+                      "audience holds its breath.",
+        "twist": "TWIST – the surprising turn: something is different from what everyone believed; it makes sense in "
+                 "hindsight because of the clue planted earlier.",
+        "happy_end": "HAPPY END – the conflict is resolved, the characters find what they needed; end warm and hopeful "
+                     "with a gentle thought for the audience. The last sentence thanks the audience.",
+    },
+    "wissen": {
+        "einstieg": "HOOK – an astonishing question, scene or fact that makes the audience curious; introduce the topic.",
+        "grundlagen": "BASICS – what you need to know: origins, how it works, the main people or places; clear and "
+                      "vivid.",
+        "vertiefung": "DEEPER – lesser-known details, connections and stories; each slide a little more surprising than "
+                      "the one before.",
+        "spannung": "TENSION – a problem, a race, a mystery or a danger: what was at stake, what was uncertain.",
+        "hoehepunkt": "CLIMAX – the most fascinating, astonishing or moving aspect of the whole topic: vivid language, "
+                      "wonder. The audience should remember this.",
+        "wendung": "SURPRISING TURN – an unexpected fact, connection or change of perspective that shows the topic in a "
+                   "new light (true and well known, not invented).",
+        "fazit": "CONCLUSION – sum up in one sentence and end warmly, positively and hopefully with a thought connected "
+                 "to the audience's own lives, so they leave with a good feeling. The last sentence thanks the audience.",
+    },
+}
+
+
+PHASEN_NAMEN = {w.split(" –")[0].strip().lower() for t in PHASEN.values() for w in t.values()} | {
+    "höhepunkt", "twist", "happy end", "wendung", "fazit", "spannung", "einleitung", "anfang", "mittelteil", "einstieg",
+    "climax", "happy ending", "conclusion", "aftermath", "build-up"}
+
+
+def ueberschrift_aus(kap: str) -> str:
+    """Überschrift eines Gliederungspunkts („Überschrift: worum es geht“). Hat das Modell den Phasennamen als
+    Überschrift genommen (gemessen 2026-10-31: „Climax“), stattdessen den Anfang der Beschreibung."""
+    kopf, _, rest = kap.partition(":")
+    kopf = re.sub(r"^\[[^\]]*\]\s*", "", kopf).strip()
+    if kopf.lower() in PHASEN_NAMEN and rest.strip():
+        woerter = rest.strip().rstrip(".").split()
+        return " ".join(woerter[:6]) + (" …" if len(woerter) > 6 else "")
+    return kopf
+
+
+def phasen_verteilen(art: str, n: int) -> list[str]:
+    """Phase je Dia: Anfang, Höhepunkt, Wendung/Twist und Schluss je einmal, die übrigen Dias auf Einleitung,
+    Mittelteil und Spannung (Gewicht 1 : 2 : 1,5) – der Mittelteil trägt die Geschichte."""
+    erste, a, b, c, hp, tw, letzte = PHASEN[art]
+    if n < 4:   # sehr kurze Gliederung: Anfang, Höhepunkt, Schluss
+        return [erste, hp, letzte][-n:] if n > 1 else [letzte]
+    rest = n - 4
+    if rest == 0:
+        mitte = []
+    elif rest == 1:
+        mitte = [c]
+    elif rest == 2:
+        mitte = [a, c]
+    else:
+        anz, gewicht = {a: 1, b: 1, c: 1}, {a: 1.0, b: 2.0, c: 1.5}
+        for _ in range(rest - 3):
+            p = min(anz, key=lambda x: anz[x] / gewicht[x])
+            anz[p] += 1
+        mitte = [a] * anz[a] + [b] * anz[b] + [c] * anz[c]
+    return [erste] + mitte + [hp, tw, letzte]
+
+
+# Bildstil (Wunsch des Nutzers 2026-10-31): auf der Startseite gewählt; die KI ergänzt nur Licht, Farben und Stimmung.
+BILDSTILE = {
+    "foto": "photorealistic photograph, realistic textures, natural light, high detail",
+    "aquarell": "watercolor painting, soft translucent washes of color, visible paper texture, delicate brush strokes",
+    "anime": "anime illustration, cel shading, clean line art, vibrant colors, still from a Japanese animated film",
+}
+
+ART_TEXTE = {   # Platzhalter in GLIEDERUNG_SYSTEM je Art
+    "geschichte": {
+        "<ART>": "This talk TELLS A STORY: one coherent, entertaining and logical story with a clear main character, a "
+                 "goal, obstacles, rising tension, a climax, a surprising twist and a happy end. Invent freely, but "
+                 "everything must fit together.",
+        "<HANDLUNG>": "the whole plot from beginning to end, including the twist and the happy end – the story bible "
+                      "from which every slide will be written.",
+        "<PERSONEN>": "1-4 recurring characters of the story (the main character first)",
+        "<TWIST>": "the surprising turn after the climax, which makes sense in hindsight, and the small clue planted "
+                   "earlier that hints at it.",
+        "<KAPITEL>": "Every slide moves the plot forward by cause and effect, the same characters and places recur, "
+                     "nothing comes out of nowhere; the twist slide reveals the twist, the last slide is the happy end "
+                     "that resolves the conflict.",
+        "<ART_REGELN>": "Tell the story like a gifted storyteller: past tense, concrete scenes, feelings, sensory "
+                        "details, a touch of humour or wonder – entertaining to listen to. Stay true to the story bible "
+                        "and the story so far: same names, characters, places and objects; every event has a cause. "
+                        "Reveal the twist ONLY on the twist slide (a subtle hint before is fine).",
+        "<ART_PRUEFUNG>": "Story logic: names, characters, their looks, places and objects stay consistent with the "
+                          "story bible and the earlier slides; every event has a cause; no new main character out of "
+                          "nowhere; the twist is not revealed before its slide. Entertainment: concrete scenes, emotions, "
+                          "a touch of humour or wonder.",
+        "<ART_PRUEFUNG_G>": "- One coherent plot that matches the story bible: the same main character(s) throughout, "
+                            "cause and effect from point to point, no loose ends, the happy end resolves the conflict.\n"
+                            "- The twist point reveals the planned twist; an earlier point plants a small clue but does "
+                            "not reveal it.",
+    },
+    "wissen": {
+        "<ART>": "This talk CONVEYS KNOWLEDGE like a gripping documentary: true, well-known facts, told so that "
+                 "curiosity and tension rise up to the most astonishing insight, followed by a surprising turn and a "
+                 "warm conclusion.",
+        "<HANDLUNG>": "the red thread: the central question the talk answers and the path from the hook to the "
+                      "conclusion.",
+        "<PERSONEN>": "0-4 people, animals or figures that appear on several slides (may be empty)",
+        "<TWIST>": "a surprising fact, connection or change of perspective for the slide after the climax – true and "
+                   "well known, not invented.",
+        "<KAPITEL>": "Every slide a NEW aspect, no repetition. Only use well-known facts; no invented names, dates or "
+                     "inventions – if unsure, choose a more general aspect.",
+        "<ART_REGELN>": "Informative, vivid and entertaining. Only state facts you are sure about: prefer well-known, "
+                        "general knowledge; name people, years and numbers only if they are famous and you are certain "
+                        "– otherwise describe without them. If the outline point itself sounds doubtful, tell what is "
+                        "really known.",
+        "<ART_PRUEFUNG>": "Doubtful facts: remove or soften claims that are probably wrong or invented (wrong inventors, "
+                          "dates, places, made-up names or numbers). Keep only what is well known.",
+        "<ART_PRUEFUNG_G>": "- Order: one clear, logical thread (e.g. chronological for history, from basics to details "
+                            "for science) that follows the red thread of the story bible.\n"
+                            "- Remove doubtful or invented facts (wrong inventors, dates, places, made-up names) – "
+                            "replace such a point with a well-known aspect of the topic.",
+    },
+}
+
 GLIEDERUNG_SYSTEM = """You plan an illustrated slide talk ("Diavortrag") for a <SPRACHE>-speaking audience, like a classic slide
 show with a projector: each slide is ONE picture plus a few sentences that a narrator reads aloud. You get the topic
-(in any language, it may also contain wishes about style or audience) and the number of slides.
+(in any language, it may also contain wishes about content or audience), the number of slides and the PHASE PLAN that
+says which part of the arc each slide belongs to. <ART>
 Answer only with JSON:
 - "titel": <SPRACHE> title of the talk, max 7 words, catchy.
 - "untertitel": <SPRACHE> subtitle, max 12 words.
-- "stil": English art style phrase that is appended to EVERY image prompt so all slides look like one series, chosen
-  to fit the topic (e.g. "vintage documentary photograph, warm film grain, soft natural light" or "detailed watercolor
-  illustration, muted colors"). If the topic asks for a style, use it. ONLY the way it is rendered (medium, technique,
-  colour palette, light, film or paper look) – NEVER subjects, objects, places or motifs (no "nebulae", no "ships",
-  no "event horizons"), otherwise every picture shows the same thing.
+- "handlung": <SPRACHE>, 4-7 sentences: <HANDLUNG>
+- "personen": <PERSONEN>, each with "name" (<SPRACHE>), "rolle" (<SPRACHE>, who they are, max 10 words) and "aussehen"
+  (English description for the image generator, 12-25 words: species or age, build, face, hair, clothing, typical
+  colours – the picture of this character will always look exactly like this).
+- "twist": <SPRACHE>, 1-2 sentences: <TWIST>
+- "stimmung": English phrase, 6-15 words, ONLY light, colour palette and mood of all pictures, fitting the topic (e.g.
+  "warm golden evening light, muted earthy colours, calm nostalgic mood"). The rendering style (photo, watercolour,
+  anime …) is fixed elsewhere – name no medium or technique, and NEVER subjects, objects, places or motifs.
 - "titel_prompt": English image prompt, 25-40 words: the opening picture of the talk, the essence of the topic, square
   composition. No text, no letters, no title.
 - "schluss_prompt": English image prompt, 20-35 words: a warm, hopeful, beautiful closing picture that rounds off the
@@ -509,17 +687,10 @@ Answer only with JSON:
   "erzaehler3" (clear, warm female alto, calm – culture, art, travel, everyday life, health, gentle topics),
   "erzaehler4" (dark, smoky male voice like film noir – crime, mysteries, dark history), "erzaehler5" (bright, friendly,
   lively – children, animals, food, hobbies, fun topics).
-- "kapitel": list of EXACTLY the requested number of <SPRACHE> strings, one per slide in order: a short heading (2-6 words),
-  a colon, and what this slide explains (max 15 words). Every slide a NEW aspect, no repetition. Only use well-known
-  facts; no invented names, dates or inventions – if unsure, choose a more general aspect.
-  Build a DRAMATIC ARC like a good documentary:
-  * opening: a hook that makes the audience curious;
-  * build-up: each slide a little more surprising or important than the one before, tension and curiosity rise;
-  * CLIMAX at about 70-80 % of the slides: the most fascinating, astonishing, dramatic or moving aspect of the whole
-    topic – the moment the audience will remember;
-  * wind-down: one or two calmer slides after the climax – what it means, what remains, how it lives on today;
-  * the LAST slide is the conclusion ("Fazit"): warm, positive and hopeful, so the audience leaves with a good feeling.
-- "hoehepunkt": the number (1-based) of the climax slide in "kapitel".
+- "kapitel": list of EXACTLY the requested number of <SPRACHE> strings, one per slide in the order of the phase plan: a
+  short heading (2-6 words) that names what happens – NEVER the phase name ("Climax", "Twist", "Happy End" …) –, a
+  colon, and what happens or is explained on this slide (max 15 words). Each slide fulfils
+  ITS phase of the plan. <KAPITEL> There is exactly ONE twist / surprising turn in the whole talk – on its own slide.
 - "sprites": 2-4 small figures or objects that fit the topic and will now and then move across the screen during the
   talk as a playful decoration (e.g. a rocket that flies, autumn leaves that fall, a steam train that runs along the
   bottom, a fish that swims, a coffee bean that rolls). The FIRST figure is the main subject of the topic itself
@@ -540,13 +711,12 @@ Answer only with JSON:
 FOLIE_SYSTEM = """You write ONE slide of a <SPRACHE> slide talk. A narrator reads your text aloud while the slide's picture
 is shown. Answer only with JSON:
 - "text": <SPRACHE> narration for this slide, {wmin}-{wmax} words, 2-4 complete sentences in natural spoken <SPRACHE> made for
-  listening: no lists, no headings, no abbreviations, no parentheses, no quotation marks. Informative and vivid. It
-  continues smoothly from the previous slide without repeating it. No greeting unless it is the first slide, no
-  farewell unless it is the last slide. Never say "auf diesem Bild", "dieses Dia" or similar. Only state facts you are
-  sure about: prefer well-known, general knowledge; name people, years and numbers only if they are famous and you are
-  certain – otherwise describe without them. If the outline point itself sounds doubtful, tell what is really known.
+  listening: no lists, no headings, no abbreviations, no parentheses, no quotation marks. It continues smoothly from
+  the previous slide without repeating it and fulfils this slide's PHASE. No greeting unless it is the first slide, no
+  farewell unless it is the last slide. Never say "auf diesem Bild", "dieses Dia" or similar. <ART_REGELN>
 - "prompt": English image prompt, 25-45 words, showing what this slide's text is about: concrete subject, setting,
-  composition, light. Follow the given camera direction. The picture must look clearly DIFFERENT from the previous
+  composition, light. Recurring characters look EXACTLY as described in the character list (copy their look: age,
+  hair, clothing, colours). Follow the given camera direction. The picture must look clearly DIFFERENT from the previous
   slides' pictures (listed): another main subject, another place, another scale or perspective – a slide show where
   every picture shows the same thing is boring. The main object of the topic does NOT have to be in every picture:
   show the people, places, instruments, details, consequences or comparisons the text talks about. Square composition. No text, no letters, no captions, no logos, no
@@ -577,39 +747,52 @@ EINSTELLUNG_ROLLE = {"hoehepunkt": "dramatic, cinematic wide shot of the key mom
 # zweiten, nüchternen Durchgang gegengeprüft, damit der Vortrag nicht widersprüchlich oder unlogisch wirkt. Der Lektor
 # sieht dabei ALLE bisher gesprochenen Dias, der Schreiber nur die letzten zwei.
 LEKTOR_GLIEDERUNG_SYSTEM = """You are the careful editor of a <SPRACHE> slide talk. A weaker planner drafted the outline
-(one line per slide). Check it and repair it if needed:
-1. Order: one clear, logical arc (e.g. chronological for history, from basics to details for science); the first point
-   introduces the topic, the last point is the conclusion ("Fazit").
-2. No point repeats or overlaps another one; no contradictions between points; no point that only makes sense before
-   a point that comes later.
-3. Remove doubtful or invented facts (wrong inventors, wrong dates, wrong places, made-up names) – replace such a point
-   with a well-known aspect of the topic.
-4. Every point fits the topic and the wishes in it.
-5. Dramatic arc: tension and curiosity rise up to the climax point (its number is given); the climax really is the most
-   fascinating, astonishing or moving aspect of the topic – if another point is stronger, swap them so the strongest
-   one sits at the climax position. After it one or two calmer points, and the last point is a warm, positive,
-   hopeful conclusion ("Fazit") that leaves the audience with a good feeling.
-Keep EXACTLY the same number of points, the same climax position and the same form ("Heading: what the slide explains").
+(one line per slide, each with its phase from the phase plan). Check it and repair it if needed:
+<ART_PRUEFUNG_G>
+- No point repeats or overlaps another one; no contradictions between points; no point that only makes sense before
+  a point that comes later. Every point fits the topic and the wishes in it.
+- Every point fulfils its phase: tension rises up to the CLIMAX point, which really is the strongest moment; exactly
+  ONE twist / surprising turn, on its own point right after the climax; the last point ends warm, positive and hopeful
+  so the audience leaves with a good feeling.
+Keep EXACTLY the same number of points, the same order of phases and the same form ("Heading: what the slide tells")
+– without the phase labels.
 Answer only with JSON:
 - "probleme": list of short German notes on what you changed and why (empty list if everything was fine).
 - "kapitel": the final list of points."""
 
-EFFEKTE = ("keiner", "schnee", "regen", "sterne", "funken", "nebel", "blasen", "gluehwuermchen", "konfetti")
-EFFEKT_WORTSTAEMME = ("schnee", "winter", "eis", "frost", "regen", "sturm", "gewitter", "flut", "weltall", "weltraum",
-                      "all", "sterne", "stern", "kosmos", "galax", "planet", "astronaut", "nachthimmel", "krieg",
-                      "schlacht", "feuer", "flamm", "explos", "bomb", "vulkan", "lava", "schmied", "nebel", "dunst",
-                      "geist", "meer", "ozean", "unterwasser", "tauch", "fisch", "glühwürm", "zauber", "märchen",
-                      "feier", "fest", "jubel", "sieg", "hochzeit")
+# Effekte über dem Dia (Wunsch des Nutzers 2026-10-31: „alles, was eine Diashow zusätzlich unterhaltsam macht“ –
+# Sprühregen, Glitzer, Feuer, Rauch, Konfetti …); gezeichnet in web/index.html (fxTeile/fxSchritt).
+EFFEKTE = ("keiner", "schnee", "regen", "spruehregen", "gewitter", "sterne", "funken", "feuer", "rauch", "nebel",
+           "blasen", "gluehwuermchen", "konfetti", "glitzer", "feuerwerk", "blaetter", "blueten", "sonnenstrahlen",
+           "staub", "herzen")
+EFFEKT_WORTSTAEMME = ("schnee", "winter", "eis", "frost", "regen", "niesel", "sturm", "gewitter", "blitz", "donner",
+                      "flut", "weltall", "weltraum", "all", "sterne", "stern", "kosmos", "galax", "planet", "astronaut",
+                      "nachthimmel", "krieg", "schlacht", "feuer", "flamm", "brand", "kamin", "lagerfeuer", "rauch",
+                      "qualm", "dampf", "explos", "bomb", "vulkan", "lava", "schmied", "nebel", "dunst", "geist",
+                      "meer", "ozean", "unterwasser", "tauch", "fisch", "glühwürm", "zauber", "magie", "märchen", "fee",
+                      "schatz", "gold", "funkel", "glitzer", "feier", "fest", "jubel", "sieg", "hochzeit", "silvester",
+                      "feuerwerk", "herbst", "blätter", "laub", "frühling", "blüte", "kirsch", "sonne", "morgen",
+                      "wüste", "sand", "staub", "dachboden", "liebe", "herz", "verliebt", "snow", "rain", "storm",
+                      "space", "star", "fire", "smoke", "magic", "gold", "party", "autumn", "leaves", "blossom",
+                      "love", "dust", "sun")
 
 # Die Atmosphäre entscheidet der Lektor gleich mit (ein Modellaufruf weniger je Dia – gemessen 2026-10-20: mit drei
 # Aufrufen je Dia brauchte die Stimme bis zu 87 s für 24 s Ton). ATMOSPHAERE_SYSTEM nur, wenn der Lektor ausfällt.
 ATMOSPHAERE_FELDER = """- "effekt": the visual atmosphere the browser draws over the slide, exactly one of: "schnee" (snow, winter, ice,
-  cold), "regen" (rain, storm, flood, bad weather), "sterne" (night sky, space, universe, planets, astronauts), "funken"
-  (fire, war, battle, explosions, forge, volcano, industry furnace), "nebel" (fog, mist, mystery, ghosts, swamp, early
-  morning), "blasen" (under water, sea, diving, fish), "gluehwuermchen" (summer night, forest at dusk, magic, fairy
-  tale), "konfetti" (celebration, festival, victory, wedding, great joy) – or "keiner". Choose an effect if the
-  narration talks about such a thing or the scene clearly is like that (a war or battle gets "funken", space gets
-  "sterne"); slides about ordinary things (people talking, planning, building, everyday life) get "keiner".
+  cold), "regen" (heavy rain, flood, bad weather), "spruehregen" (drizzle, fine spray, sea spray, waterfall mist, a
+  grey wet day), "gewitter" (thunderstorm with lightning, storm at night, dramatic danger), "sterne" (night sky, space,
+  universe, planets, astronauts), "funken" (war, battle, explosions, forge, industry furnace), "feuer" (flames, a
+  campfire, a burning house, a fireplace, dragons breathing fire, volcano), "rauch" (smoke, steam engines, chimneys,
+  battlefield smoke, ruins, incense), "nebel" (fog, mist, mystery, ghosts, swamp, early morning), "blasen" (under water,
+  sea, diving, fish), "gluehwuermchen" (summer night, forest at dusk, fairy tale), "konfetti" (celebration, party,
+  wedding, carnival), "glitzer" (magic, a spell, treasure, gold, jewels, wishes coming true, a wonderful surprise),
+  "feuerwerk" (victory, New Year, a great triumph, a festival at night), "blaetter" (autumn, wind, forest, passing
+  time), "blueten" (spring, cherry blossom, gardens, romance, new beginnings), "sonnenstrahlen" (sunrise, hope, a
+  sacred or peaceful place, light breaking through clouds or a forest), "staub" (old attics, libraries, archaeology,
+  desert, sunbeams in an old room), "herzen" (love, friendship, affection, a happy reunion) – or "keiner". Choose an
+  effect if the narration talks about such a thing or the scene clearly is like that (a war or battle gets "funken",
+  space gets "sterne", a happy end may get "konfetti", "glitzer" or "feuerwerk"); slides about ordinary things
+  (people talking, planning, building, everyday life) get "keiner".
 - "figur": the name of ONE of the talk's figures (list given) if it appears in or clearly fits what this slide tells
   (e.g. the figure "Rakete" when rockets fly, a bird when birds are mentioned), otherwise "".
   Words noticed in the text may be given as a hint – decide yourself whether they really describe the scene
@@ -619,20 +802,19 @@ ATMOSPHAERE_SYSTEM = ("You choose the visual atmosphere for ONE slide of a slide
                       "narration describes. Answer only with JSON:\n" + ATMOSPHAERE_FELDER)
 
 LEKTOR_DIA_SYSTEM = """You are the careful editor of a <SPRACHE> slide talk. A weaker writer drafted the narration of ONE
-slide. Check it against the outline and against EVERYTHING that was said on the earlier slides, and repair it if needed:
+slide. Check it against the outline, the story bible and EVERYTHING that was said on the earlier slides, and repair it
+if needed:
 1. Contradictions: nothing may contradict an earlier slide (dates, names, numbers, order of events, who did what).
 2. Logic and flow: the slide must follow sensibly from the previous slide (time order, cause and effect) and cover its
-   own outline point. No jumps that make the talk seem illogical, nothing told as new that was already explained,
-   nothing presented as earlier or later than it really happened.
+   own outline point. No jumps that make the talk seem illogical, nothing told as new that was already explained.
 3. Repetition: no sentence or fact that was already said on an earlier slide.
-4. Doubtful facts: remove or soften claims that are probably wrong or invented (wrong inventors, dates, places,
-   made-up names or numbers). Keep only what is well known.
+4. <ART_PRUEFUNG>
 5. Form: {wmin}-{wmax} words, 2-4 complete sentences in natural spoken <SPRACHE> for listening, no lists, no parentheses, no
    quotation marks, never "auf diesem Bild" or "dieses Dia". Only the first slide may welcome the audience, only the
    last slide may thank them and say goodbye.
-6. Role in the dramatic arc (given with the slide): build-up slides raise curiosity, the climax slide is the most vivid
-   and moving moment of the talk, wind-down slides are calmer, the last slide ends warm, positive and hopeful so the
-   audience leaves with a good feeling. Strengthen the draft where it misses its role.
+6. Phase (given with the slide): the slide must fulfil it – the climax is the most vivid moment, the twist / surprising
+   turn appears ONLY on its own slide, the last slide ends warm, positive and hopeful so the audience leaves with a good
+   feeling. Strengthen the draft where it misses its phase.
 Change as little as necessary: if the draft is fine, return it unchanged.
 Answer only with JSON:
 - "probleme": list of short German notes on what was wrong (empty list if nothing).
@@ -769,27 +951,40 @@ def sprache_passt(text: str, sprache: str) -> bool:
     return beste == sprache or treffer[beste] < 3 or treffer.get(sprache, 0) * 2 > treffer[beste]
 
 
-ROLLEN = {
-    "aufbau": "BUILD-UP – raise curiosity and suspense; each slide a little more astonishing than the one before, lead "
-              "towards the climax (now and then a sentence may make the audience curious about what is coming).",
-    "hoehepunkt": "CLIMAX – the most fascinating, moving moment of the whole talk: vivid, pictorial language, powerful "
-                  "sentences, wonder. The audience should remember this.",
-    "ausklang": "AFTERMATH after the climax – calmer: what does it mean, what remains, how does it still matter today.",
-    "schluss": "CONCLUSION – sum up in one sentence and end warmly, positively and hopefully with a beautiful thought "
-               "connected to the audience's own lives, so they leave with a good feeling. The last sentence thanks "
-               "the audience.",
-}
+# --- 2.5D und Lampen (tiefe.py, Python-Umgebung von ComfyUI) ----------------------------------------------------
+
+COMFY_PYTHON = COMFYUI_DIR / "venv" / "Scripts" / "python.exe"
+_tiefe = {"prozess": None, "aus": False}
+_tiefe_sperre = threading.Lock()
 
 
-def hoehepunkt_pruefen(wert, n: int) -> int:
-    """Höhepunkt-Dia aus der Gliederung – sonst bei ~75 %; nie das erste und nie das letzte (Fazit)."""
-    try:
-        hp = int(wert)
-    except (TypeError, ValueError):
-        hp = 0
-    if not 2 <= hp <= n - 1 or hp < n * 0.5:   # zu früh wäre kein Bogen
-        hp = round(n * 0.75)
-    return max(1, min(n - 1, hp))
+def tiefe_berechnen(bild: Path) -> dict | None:
+    """Tiefenmasken und Lampen für ein Bild (tiefe.py, einmal gestartet, bleibt geladen). None, wenn nicht verfügbar –
+    dann zeigt der Browser das Dia flach."""
+    with _tiefe_sperre:
+        if _tiefe["aus"]:
+            return None
+        p = _tiefe["prozess"]
+        try:
+            if p is None or p.poll() is not None:
+                if not COMFY_PYTHON.is_file():
+                    _tiefe["aus"] = True
+                    return None
+                p = _tiefe["prozess"] = subprocess.Popen(
+                    [str(COMFY_PYTHON), "-I", str(HIER / "tiefe.py")], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, text=True, encoding="utf-8", creationflags=KEIN_FENSTER)
+                start = json.loads(p.stdout.readline() or "{}")
+                if "fehler" in start:
+                    log(f"2.5D: {start['fehler']}")
+                    start = json.loads(p.stdout.readline() or "{}")
+                log(f"2.5D: Tiefendienst {'bereit' if start.get('bereit') else 'ohne Tiefenmodell (nur Lampen)'}")
+            p.stdin.write(str(bild) + "\n")
+            p.stdin.flush()
+            return json.loads(p.stdout.readline())
+        except Exception as exc:  # noqa: BLE001
+            log(f"2.5D nicht verfügbar: {type(exc).__name__}: {exc}")
+            _tiefe["aus"] = True
+            return None
 
 
 def aehnlichkeit(a: str, b: str) -> float:
@@ -870,13 +1065,22 @@ def _auspacken(x):
 # --- Der Vortrag ------------------------------------------------------------------------------------------------
 
 class Vortrag:
-    def __init__(self, thema: str, minuten: int, musik: str, figuren: bool = True, sprache: str = "de"):
+    def __init__(self, thema: str, minuten: int, musik: str, figuren: bool = True, sprache: str = "de",
+                 bildstil: str = "foto", stil_eigen: str = ""):
         self.id = uuid.uuid4().hex[:10]
         self.ordner = VORTRAEGE_DIR / self.id
         self.ordner.mkdir(parents=True)
         self.thema, self.minuten, self.musik_modus = thema, minuten, musik
         self.mit_figuren = figuren   # auf der Startseite abwählbar – dann wird auch keine Figur gemalt
         self.sprache = sprache if sprache in SPRACHEN else "de"   # Sprache von Text und Stimme (Startseite)
+        # Bildstil von der Startseite: foto | aquarell | anime | eigen (dann stil_eigen, frei formuliert)
+        self.bildstil = bildstil if bildstil in (*BILDSTILE, "eigen") and (bildstil != "eigen" or stil_eigen) else "foto"
+        self.stil_eigen = stil_eigen
+        self.art = "wissen"   # wissen | geschichte – entscheidet die KI am Anfang
+        self.phasen: list[str] = []   # Phase der Richtschnur je Gliederungspunkt
+        self.handlung = self.twist = ""   # Geschichtsbibel: jedes Dia kennt Handlung bzw. roten Faden und Twist
+        self.personen: list[dict] = []   # {"name", "rolle", "aussehen", "referenz"} – referenz = Bild in ComfyUI
+        self.tiefen: dict[str, dict] = {}   # Bild-URL -> {"mid", "near", "lampen"} für 2.5D im Browser
         self.geplant = max(4, round((minuten * 60 - TITEL_SEKUNDEN - SCHLUSS_SEKUNDEN) / DIA_SEKUNDEN))
         self.phase = "vorbereitung"   # vorbereitung -> bereit -> fertig | abgebrochen | fehler
         self.meldung = "Der Projektor wärmt sich auf …"
@@ -947,6 +1151,7 @@ class Vortrag:
                 "sprites": [{"name": s["name"], "bewegung": s["bewegung"], "url": s["url"]} for s in self.sprites],
                 "musik_meldung": self.musik_meldung, "stimme": self.stimme_art, "minuten": self.minuten,
                 "rest_sekunden": None if self.ende_zeit is None else round(self.ende_zeit - time.time()),
+                "art": self.art, "tiefen": dict(self.tiefen),
             }
 
     def position_setzen(self, pos: int):
@@ -983,27 +1188,32 @@ class Vortrag:
             self._melden("Sprachmodell wird gefragt …")
             if not lms_sicherstellen():
                 raise RuntimeError("In LM Studio ist kein Sprachmodell geladen, und es ließ sich keins laden.")
-            self._melden("Die Gliederung entsteht …")
+            self.art = self._art_bestimmen()
+            self.phasen = phasen_verteilen(self.art, self.geplant)
+            self._melden("Die Geschichte entsteht …" if self.art == "geschichte" else "Die Gliederung entsteht …")
             # Das Modell liefert manchmal viel weniger Punkte als verlangt (gemessen 2026-10-20: 5 statt 11 – der
             # Vortrag wäre nur halb so lang geworden). Dann einmal mit der konkreten Zahl nachfragen, das längere zählt.
-            g, auftrag = None, f"Topic: {self.thema}\nNumber of slides: {self.geplant}\n{self._sprachhinweis()}"
+            grund = (f"Topic: {self.thema}\nNumber of slides: {self.geplant}\nPhase plan:\n"
+                     + "\n".join(f"{i}. {PHASEN[self.art][p]}" for i, p in enumerate(self.phasen, 1)) + "\n")
+            g, auftrag = None, grund + self._sprachhinweis()
             for versuch in range(2):
                 neu = qwen_json(self._p(GLIEDERUNG_SYSTEM), auftrag, {
-                    "titel": TEXT, "untertitel": TEXT, "stil": TEXT, "titel_prompt": TEXT, "schluss_prompt": TEXT,
+                    "titel": TEXT, "untertitel": TEXT, "handlung": TEXT, "twist": TEXT, "stimmung": TEXT,
+                    "personen": {"type": "array", "items": {"type": "object", "properties": {
+                        "name": TEXT, "rolle": TEXT, "aussehen": TEXT}, "required": ["name", "rolle", "aussehen"]}},
+                    "titel_prompt": TEXT, "schluss_prompt": TEXT,
                     "musik": TEXT, "sprecher": TEXT, "kapitel": {"type": "array", "items": TEXT},
-                    "hoehepunkt": {"type": "integer"},
                     "sprites": {"type": "array", "items": {"type": "object", "properties": {
                         "name": TEXT, "prompt": TEXT, "bewegung": {"type": "string", "enum": list(SPRITE_BEWEGUNGEN)}},
-                        "required": ["name", "prompt", "bewegung"]}}}, temperatur=0.7, max_tokens=4500, timeout=150)
+                        "required": ["name", "prompt", "bewegung"]}}}, temperatur=0.7, max_tokens=5500, timeout=180)
                 if g is None or len(neu.get("kapitel", [])) > len(g.get("kapitel", [])):
                     g = neu
                 n = len(g.get("kapitel", []))
                 if n >= round(self.geplant * 0.85):
                     break
                 log(f"Gliederung: nur {n} von {self.geplant} Punkten – frage nach")
-                auftrag = (f"Topic: {self.thema}\nNumber of slides: {self.geplant}\nATTENTION: the list \"kapitel\" must "
-                           f"have EXACTLY {self.geplant} entries (one per slide) – the last attempt had only {n}.\n"
-                           f"{self._sprachhinweis()}")
+                auftrag = (grund + f"ATTENTION: the list \"kapitel\" must have EXACTLY {self.geplant} entries (one per "
+                           f"slide) – the last attempt had only {n}.\n{self._sprachhinweis()}")
             plan = [s for s in g.get("sprites", []) if isinstance(s, dict) and str(s.get("prompt", "")).strip()][:4]
             if not self.mit_figuren:
                 plan = []
@@ -1013,10 +1223,18 @@ class Vortrag:
                                  "url": None} for i, s in enumerate(plan)]
             if self.sprites:
                 log(f"Vortrag {self.id}: Figuren " + ", ".join(f"{s['name']} ({s['bewegung']})" for s in self.sprites))
-            kapitel =[str(k).strip() for k in g.get("kapitel", []) if str(k).strip()]
+            kapitel = [re.sub(r"^\s*\d+[.)]\s*", "", str(k)).strip() for k in g.get("kapitel", []) if str(k).strip()]
             if len(kapitel) < 2:
                 raise RuntimeError("Das Sprachmodell hat keine brauchbare Gliederung geliefert.")
-            hp = hoehepunkt_pruefen(g.get("hoehepunkt"), len(kapitel))
+            if len(kapitel) > self.geplant:
+                kapitel = kapitel[:self.geplant - 1] + kapitel[-1:]   # das Ende (Happy End / Fazit) bleibt
+            if len(kapitel) != len(self.phasen):
+                self.phasen = phasen_verteilen(self.art, len(kapitel))
+            hp = self.phasen.index(list(PHASEN[self.art])[4]) + 1 if len(kapitel) >= 3 else len(kapitel)
+            self.handlung, self.twist = str(g.get("handlung", "")).strip(), str(g.get("twist", "")).strip()
+            self.personen = [{"name": str(p.get("name", "")).strip(), "rolle": str(p.get("rolle", "")).strip(),
+                              "aussehen": str(p.get("aussehen", "")).strip(), "referenz": None}
+                             for p in g.get("personen", []) if isinstance(p, dict) and str(p.get("name", "")).strip()][:4]
             self._melden("Die Gliederung wird gegengeprüft …")
             kapitel = self._gliederung_pruefen(kapitel, hp)
             titel, untertitel = g["titel"].strip(), g["untertitel"].strip()
@@ -1029,9 +1247,11 @@ class Vortrag:
                 self.geplant = len(kapitel)
                 self.hoehepunkt = hp
                 self.sprecher = g["sprecher"] if g.get("sprecher") in SPRECHER else "erzaehler3"
-            self.stil = self._stil_saeubern(g["stil"].strip())
-            log(f"Vortrag {self.id}: „{self.titel}“, {self.geplant} Dias, Höhepunkt Dia {hp} "
+            self.stil = self._stil_bauen(str(g.get("stimmung", "")).strip())
+            log(f"Vortrag {self.id}: „{self.titel}“ ({self.art}), {self.geplant} Dias, Höhepunkt Dia {hp} "
                 f"({kapitel[hp - 1].split(':', 1)[0]}), Sprecher {self.sprecher}, Stil: {self.stil}")
+            log(f"Vortrag {self.id}: Handlung: {self.handlung[:300]} | Twist: {self.twist[:160]} | Personen: "
+                + ", ".join(f"{p['name']} ({p['aussehen'][:50]})" for p in self.personen))
             if self.musik_modus == "erzeugen":
                 threading.Thread(target=self._musik_erzeugen, args=(g.get("musik", ""),), daemon=True).start()
 
@@ -1042,6 +1262,11 @@ class Vortrag:
             threading.Thread(target=self._ton_band, daemon=True).start()
             threading.Thread(target=self._sprite_band, daemon=True).start()
             self.bild_q.put(("titel", 0, g["titel_prompt"], None))
+            # Referenzbilder der wiederkehrenden Figuren (Wunsch des Nutzers 2026-10-31): einmal malen, dann hängen
+            # sie an jedem Dia, in dem die Figur vorkommt – so sieht sie überall gleich aus.
+            for i, p in enumerate(self.personen[:REFERENZ_PERSONEN]):
+                if p["aussehen"]:
+                    self.bild_q.put(("referenz", i, p["aussehen"], None))
             self._text_band()
             self.bild_q.put(("schluss", 0, g["schluss_prompt"], None))
             self.bild_q.put(None)
@@ -1071,16 +1296,19 @@ class Vortrag:
         Bei Fehlern oder anderer Länge bleibt der letzte brauchbare Stand."""
         hinweis = ""
         for durchgang in range(2):
-            liste = "\n".join(f"{i}. {t}" for i, t in enumerate(kapitel, 1))
+            liste = "\n".join(f"{i}. [{PHASEN[self.art][p].split(' –')[0]}] {t}"
+                              for i, (t, p) in enumerate(zip(kapitel, self.phasen), 1))
             try:
-                erg = qwen_json(self._p(LEKTOR_GLIEDERUNG_SYSTEM), f"Topic: {self.thema}\nNumber of points: {len(kapitel)}\n"
-                                f"Climax: point {hp}\n\nDraft outline:\n{liste}{hinweis}\n\n{self._sprachhinweis()}",
+                erg = qwen_json(self._p(LEKTOR_GLIEDERUNG_SYSTEM), f"Topic: {self.thema}\n{self._bibel()}\n"
+                                f"Number of points: {len(kapitel)}\nClimax: point {hp}\n\n"
+                                f"Draft outline:\n{liste}{hinweis}\n\n{self._sprachhinweis()}",
                                 {"probleme": {"type": "array", "items": TEXT}, "kapitel": {"type": "array", "items": TEXT}},
                                 temperatur=0.3, max_tokens=4500, timeout=120)
             except Exception as exc:  # noqa: BLE001
                 log(f"Lektor Gliederung: {exc} – Entwurf bleibt")
                 return kapitel
-            neu = [re.sub(r"^\s*\d+[.)]\s*", "", str(k)).strip() for k in erg.get("kapitel", []) if str(k).strip()]
+            neu = [re.sub(r"^\s*\d+[.)]\s*(\[[^\]]*\]\s*)?", "", str(k)).strip()
+                   for k in erg.get("kapitel", []) if str(k).strip()]
             probleme = [str(p).strip() for p in erg.get("probleme", []) if str(p).strip()]
             if len(neu) != len(kapitel):
                 log(f"Lektor Gliederung: {len(neu)} statt {len(kapitel)} Punkte – Entwurf bleibt")
@@ -1128,14 +1356,32 @@ class Vortrag:
             log(f"Übersetzung nach {ziel}: {exc}")
         return texte
 
-    def _dia_pruefen(self, k: int, kap: str, f: dict, vorher: list[str], letztes: bool, rolle: str) -> dict:
-        """Lektor-Durchgang über ein Dia: Widersprüche, Logik, Wiederholungen, zweifelhafte Fakten, Rolle im
-        Spannungsbogen. Taugt die Korrektur nicht (zu kurz, wiederholt), bleibt der Entwurf."""
-        liste = "\n".join(f"{i}. {t}" for i, t in enumerate(self.kapitel, 1))
+    def _bibel(self) -> str:
+        """Geschichtsbibel für jeden Auftrag (Wunsch des Nutzers 2026-10-31: „Jedes dieser Teile muss wissen, welche
+        Geschichte hier erzählt werden soll“): Art, Handlung bzw. roter Faden, Figuren mit Aussehen, der eine Twist."""
+        teile = [f"Kind of talk: {'STORY (told, fictional)' if self.art == 'geschichte' else 'KNOWLEDGE (true facts)'}"]
+        if self.handlung:
+            teile.append(f"{'Story bible – the whole plot' if self.art == 'geschichte' else 'Red thread'}: {self.handlung}")
+        if self.personen:
+            teile.append("Characters:\n" + "\n".join(f"- {p['name']}: {p['rolle']}; look: {p['aussehen']}"
+                                                     for p in self.personen))
+        if self.twist:
+            teile.append(f"The ONE {'twist' if self.art == 'geschichte' else 'surprising turn'} (only on its own "
+                         f"slide): {self.twist}")
+        return "\n".join(teile)
+
+    def _gliederung_mit_phasen(self) -> str:
+        return "\n".join(f"{i}. [{PHASEN[self.art][p].split(' –')[0]}] {t}"
+                         for i, (t, p) in enumerate(zip(self.kapitel, self.phasen), 1))
+
+    def _dia_pruefen(self, k: int, kap: str, f: dict, vorher: list[str], letztes: bool, rolle: str, phase: str) -> dict:
+        """Lektor-Durchgang über ein Dia: Widersprüche, Logik, Wiederholungen, zweifelhafte Fakten bzw. Logik der
+        Geschichte, Phase der Richtschnur. Taugt die Korrektur nicht (zu kurz, wiederholt), bleibt der Entwurf."""
         bisher = "\n".join(f"Slide {i}: {t}" for i, t in enumerate(vorher, 1)) or "(nothing yet – this is the first slide)"
         lage = "the FIRST slide" if k == 1 else ("the LAST slide" if letztes else f"slide {k}")
-        auftrag = (f"Topic: {self.thema}\nTitle: {self.titel}\nOutline:\n{liste}\n\n"
-                   f"This is {lage}, outline point: {kap}\nRole in the dramatic arc: {ROLLEN[rolle]}\n\n"
+        auftrag = (f"Topic: {self.thema}\nTitle: {self.titel}\n{self._bibel()}\n\n"
+                   f"Outline:\n{self._gliederung_mit_phasen()}\n\n"
+                   f"This is {lage}, outline point: {kap}\nPhase: {PHASEN[self.art][phase]}\n\n"
                    f"Said so far:\n{bisher}\n\n"
                    f"Draft – text: {f['text']}\nDraft – prompt: {f.get('prompt', '')}\n"
                    f"Camera framing for this slide: {self._einstellung(k, rolle)}\n"
@@ -1165,44 +1411,62 @@ class Vortrag:
         return {"text": text, "prompt": prompt, "effekt": effekt, "sprite": sprite}
 
     def _text_band(self):
-        """Schreibt Dia für Dia entlang des Spannungsbogens (Wunsch des Nutzers 2026-10-20: Höhepunkt, dann ein Ende
-        mit gutem Gefühl). Wird die Zeit knapp, kommt zuerst der Höhepunkt und gleich danach das Fazit – der Höhepunkt
-        wird nie weggekürzt."""
+        """Schreibt Dia für Dia entlang der Richtschnur (Wunsch des Nutzers 2026-10-31: Anfang, Einleitung, Mittelteil,
+        Spannung, Höhepunkt, Twist, Happy End – bzw. für Wissen Einstieg … Fazit). Jedes Dia kennt die Geschichtsbibel
+        und – bei Geschichten – alles bisher Erzählte. Wird die Zeit knapp, kommen Höhepunkt, Twist und Schluss vorgezogen;
+        fällt der Twist weg, erzählt ihn der Schluss in einem Satz mit."""
         vorher: list[str] = []
+        geschrieben: set[int] = set()
+        hp = self.hoehepunkt
+        n = len(self.kapitel)
         hp_erreicht = False
-        nur_noch_fazit = False
+        vorgezogen: list[int] = []
         for k in range(1, self.geplant + 1):
             while not self.abbruch.is_set() and k - max(self.position, 0) > VORLAUF + 1:
                 time.sleep(0.3)
             GPU.vorrang(k + .2, self.abbruch)   # Text für Dia k: nach Stimme und Bild der früheren Dias
             if self.abbruch.is_set():
                 return
-            if nur_noch_fazit or k == self.geplant:
-                letztes, idx = True, len(self.kapitel) - 1
-            elif not hp_erreicht and k < self.hoehepunkt and k >= 3 and self._zeit_knapp(k, reserve=2.5):
-                letztes, idx = False, self.hoehepunkt - 1   # Zeit nur noch für zwei Dias: Höhepunkt vorziehen
-                nur_noch_fazit = True
+            if vorgezogen:
+                idx = vorgezogen.pop(0)
+            elif k == self.geplant:
+                idx = n - 1
+            elif not hp_erreicht and k < hp and k >= 3 and self._zeit_knapp(k, reserve=3.5):
+                idx = hp - 1   # Zeit nur noch für drei Dias: Höhepunkt, Twist, Schluss
+                vorgezogen = [i for i in (hp, n - 1) if i > idx]
                 log(f"Dia {k}: Zeit wird knapp – Höhepunkt wird vorgezogen")
             elif hp_erreicht and k >= 3 and self._zeit_knapp(k):
-                letztes, idx = True, len(self.kapitel) - 1
+                idx = n - 1
             else:
-                letztes, idx = False, k - 1
+                idx = k - 1
+            letztes = idx == n - 1
             kap = self.kapitel[idx]
-            rolle = ("schluss" if letztes else "hoehepunkt" if idx == self.hoehepunkt - 1
-                     else "aufbau" if idx < self.hoehepunkt - 1 else "ausklang")
+            phase = self.phasen[idx]
+            rolle = ("schluss" if letztes else "hoehepunkt" if idx == hp - 1
+                     else "aufbau" if idx < hp - 1 else "ausklang")
             if rolle == "hoehepunkt":
                 hp_erreicht = True
-            liste = "\n".join(f"{i}. {t}" for i, t in enumerate(self.kapitel, 1))
-            auftrag = (f"Topic: {self.thema}\nTitle of the talk: {self.titel}\n"
-                       f"Outline:\n{liste}\n\n"
-                       f"Now write slide {k}: {kap}\nRole in the dramatic arc: {ROLLEN[rolle]}\n"
+            auftrag = (f"Topic: {self.thema}\nTitle of the talk: {self.titel}\n{self._bibel()}\n\n"
+                       f"Outline:\n{self._gliederung_mit_phasen()}\n\n"
+                       f"Now write slide {k}: {kap}\nPhase: {PHASEN[self.art][phase]}\n"
                        f"Camera framing for this slide: {self._einstellung(k, rolle)}\n"
                        f"Previous pictures (the new one must look different):\n{self._bisherige_bilder()}\n")
             if k == 1:
                 auftrag += "This is the FIRST slide: introduce the topic briefly and make the audience curious.\n"
+            twist_idx = hp if hp < n - 1 else None
+            if letztes and twist_idx is not None and twist_idx not in geschrieben and self.twist:
+                auftrag += (f"The twist has not been told yet (time ran short): reveal it in one sentence before the "
+                            f"ending – {self.twist}\n")
+            elif twist_idx is not None and idx < twist_idx:
+                auftrag += "Do NOT reveal the twist / surprising turn yet.\n"
             if vorher:
-                auftrag += ("\nThe last slides said (for orientation only – take NO sentence from them and begin "
-                            "differently):\n" + "\n".join(f"- {t}" for t in vorher[-2:]) + "\n")
+                if self.art == "geschichte":   # die Geschichte muss zusammenhängen: alles bisher Erzählte
+                    auftrag += ("\nThe story so far (continue it – take NO sentence from it and begin differently):\n"
+                                + "\n".join(f"{i}. {t}" for i, t in enumerate(vorher[-12:], max(1, len(vorher) - 11)))
+                                + "\n")
+                else:
+                    auftrag += ("\nThe last slides said (for orientation only – take NO sentence from them and begin "
+                                "differently):\n" + "\n".join(f"- {t}" for t in vorher[-2:]) + "\n")
             # Die Sprache steht zuletzt: das schwache Modell richtet sich nach dem Ende des Auftrags
             sprachhinweis = f"\n{self._sprachhinweis()}"
             f = None
@@ -1237,17 +1501,19 @@ class Vortrag:
             else:
                 if not sprache_passt(f["text"], self.sprache):
                     f["text"] = self._uebersetzen([f["text"]])[0]
-                f = self._dia_pruefen(k, kap, f, vorher, letztes, rolle)
+                f = self._dia_pruefen(k, kap, f, vorher, letztes, rolle, phase)
             if "effekt" in f:   # vom Lektor gleich mitentschieden
                 effekt, sprite = f["effekt"], f["sprite"]
             else:
                 effekt, sprite = self._atmosphaere(k, f["text"])
-            ueberschrift = kap.split(":", 1)[0].strip()
+            ueberschrift = ueberschrift_aus(kap)
             if f.get("prompt"):
                 self.bild_prompts.append(f["prompt"])
+            figuren = self._figuren_im_dia(f["text"], f.get("prompt", ""))
             self.bild_q.put(("dia", k, f["prompt"], {"text": f["text"].strip(), "ueberschrift": ueberschrift,
                                                      "letztes": letztes, "rolle": rolle, "effekt": effekt,
-                                                     "sprite": sprite}))
+                                                     "sprite": sprite, "figuren": figuren}))
+            geschrieben.add(idx)
             if k == self.start_dias():   # Figuren erst nach den Start-Dias malen – sie verzögern den Start nicht
                 for i, s in enumerate(self.sprites):
                     self.bild_q.put(("sprite", i, s["prompt"], None))
@@ -1259,6 +1525,46 @@ class Vortrag:
                     self.letztes = k
                 return
 
+    def _figuren_im_dia(self, text: str, prompt: str) -> list[int]:
+        """Welche wiederkehrenden Figuren kommen in diesem Dia vor? (Name im Sprechtext oder Bildauftrag)"""
+        woerter = set(_woerter(text + " " + prompt))
+        treffer = []
+        for i, p in enumerate(self.personen):
+            namen = [w for w in _woerter(p["name"]) if len(w) >= 3]
+            if namen and any(w in woerter for w in namen):
+                treffer.append(i)
+        return treffer[:REFERENZEN_JE_DIA]
+
+    def _referenz_malen(self, i: int, aussehen: str):
+        """Referenzbild einer Figur: ganz, von vorn, neutraler Hintergrund – im selben Stil und mit demselben Seed wie
+        die Dias. Danach in ComfyUIs input-Ordner, damit jedes Dia mit dieser Figur es per ReferenceLatent nutzt."""
+        ziel = self.ordner / f"figur_{i}.png"
+        t = time.perf_counter()
+        try:
+            if bild_erzeugen(f"Character reference sheet: one single character, full body, standing, front view, neutral "
+                             f"pose, face clearly visible: {aussehen.strip().rstrip('.')}. Plain light grey background, "
+                             f"nothing else. {self.stil}", self.seed, ziel, self):
+                self.personen[i]["referenz"] = comfy_hochladen(ziel, f"diashow_{self.id}_figur_{i}.png")
+                log(f"Referenzbild {self.personen[i]['name']}: {time.perf_counter() - t:.1f} s")
+        except Exception as exc:  # noqa: BLE001
+            log(f"Referenzbild {self.personen[i]['name']}: {exc}")
+
+    def _tiefe(self, name: str):
+        """2.5D-Masken und Lampen für ein fertiges Bild – im eigenen Thread, das Bild-Fließband wartet nicht darauf."""
+        def rechnen():
+            erg = tiefe_berechnen(self.ordner / name)
+            if not erg or erg.get("fehler"):
+                if erg and erg.get("fehler"):
+                    log(f"2.5D {name}: {erg['fehler']}")
+                return
+            stamm = name.rsplit(".", 1)[0]
+            with self.sperre:
+                self.tiefen[self._url(name)] = {
+                    "mid": self._url(f"{stamm}_mid.webp") if erg.get("tiefe") else None,
+                    "near": self._url(f"{stamm}_near.webp") if erg.get("tiefe") else None,
+                    "lampen": erg.get("lampen", [])}
+        threading.Thread(target=rechnen, daemon=True).start()
+
     def _bild_band(self):
         while True:
             auftrag = self.bild_q.get()
@@ -1268,19 +1574,32 @@ class Vortrag:
             art, k, prompt, daten = auftrag
             if self.abbruch.is_set():
                 continue
-            # Titel zuerst, Dia k vor seinem Text-Nachfolger; Figuren nach den Start-Dias, das Schlussbild ganz am Ende
-            GPU.vorrang({"titel": .1, "sprite": self.start_dias() + .5, "schluss": self.geplant + .1}.get(art, k + .1), self.abbruch)
+            # Titel zuerst, dann die Figuren-Referenzen, Dia k vor seinem Text-Nachfolger; Sprites nach den Start-Dias,
+            # das Schlussbild ganz am Ende
+            GPU.vorrang({"titel": .1, "referenz": .15, "sprite": self.start_dias() + .5,
+                         "schluss": self.geplant + .1}.get(art, k + .1), self.abbruch)
             if art == "sprite":
                 self._sprite_malen(k, prompt)
+                continue
+            if art == "referenz":
+                self._referenz_malen(k, prompt)
                 continue
             name = {"titel": "titel.png", "schluss": "schluss.png"}.get(art, f"dia_{k:03d}.png")
             ok = False
             if prompt:
                 t = time.perf_counter()
+                figuren = [self.personen[i] for i in (daten or {}).get("figuren", [])]
+                refs = [p["referenz"] for p in figuren if p.get("referenz")]
+                # Aussehen der Figuren mit in den Bildauftrag (wirkt auch ohne Referenzbild)
+                aussehen = " ".join(f"{p['aussehen'].strip().rstrip('.')}." for p in figuren
+                                    if p["aussehen"] and p["aussehen"][:30].lower() not in prompt.lower())
                 try:
-                    ok = bild_erzeugen(f"{prompt.strip().rstrip('.')}. {self.stil}", self.seed + k + (0 if art != "schluss" else 999),
-                                       self.ordner / name, self)
-                    log(f"Bild {name}: {time.perf_counter() - t:.1f} s")
+                    # ein Seed für den ganzen Vortrag (Wunsch des Nutzers 2026-10-31): der Stil bleibt gleich
+                    ok = bild_erzeugen(f"{prompt.strip().rstrip('.')}. {aussehen} {self.stil}", self.seed,
+                                       self.ordner / name, self, referenzen=refs)
+                    log(f"Bild {name}: {time.perf_counter() - t:.1f} s" + (f" ({len(refs)} Referenz)" if refs else ""))
+                    if ok:
+                        self._tiefe(name)
                 except Exception as exc:  # noqa: BLE001
                     log(f"Bild {name}: {exc}")
             if art == "titel":
@@ -1308,7 +1627,7 @@ class Vortrag:
             ok = bild_erzeugen(f"{prompt.strip().rstrip('.')}, {SPRITE_POSE.get(self.sprites[i]['bewegung'], '')}. "
                                f"{self.stil}. Single isolated subject, side view facing right, whole subject visible and "
                                f"centered, on a plain pure white background, no ground, no shadow, no text.",
-                               self.seed + 500 + i, roh, self, SPRITE_MAL_GROESSE)
+                               self.seed, roh, self, SPRITE_MAL_GROESSE)
         except Exception as exc:  # noqa: BLE001
             log(f"Figur {i}: {exc}")
             return
@@ -1336,14 +1655,42 @@ class Vortrag:
                 f"narration) in {ziel} only – no matter in which language the topic or these instructions are written.")
 
     def _p(self, system: str) -> str:
-        """Anweisung an das Sprachmodell in der gewählten Vortragssprache (Platzhalter <SPRACHE>)."""
+        """Anweisung an das Sprachmodell in der gewählten Vortragssprache (Platzhalter <SPRACHE>) und für die Art des
+        Vortrags (<ART>, <ART_REGELN> … aus ART_TEXTE)."""
+        for platzhalter, text in ART_TEXTE[self.art].items():
+            system = system.replace(platzhalter, text)
         return system.replace("<SPRACHE>", SPRACHEN[self.sprache][0])
 
-    def _stil_saeubern(self, stil: str) -> str:
+    def _art_bestimmen(self) -> str:
+        """Wissensvermittlung oder Geschichte? (Wunsch des Nutzers 2026-10-31: das stellt die KI am Anfang fest)"""
+        try:
+            erg = qwen_json(ART_SYSTEM, f"Topic: {self.thema}",
+                            {"art": {"type": "string", "enum": ["wissen", "geschichte"]}},
+                            temperatur=0.1, max_tokens=40, timeout=30)
+            art = erg.get("art") if erg.get("art") in PHASEN else "wissen"
+        except Exception as exc:  # noqa: BLE001
+            log(f"Art des Vortrags: {exc} – Wissen")
+            art = "wissen"
+        log(f"Vortrag {self.id}: Art {art}")
+        return art
+
+    def _stil_bauen(self, stimmung: str) -> str:
+        """Bildstil von der Startseite (Foto, Aquarell, Anime oder eigener Wunsch) + Licht und Stimmung der KI."""
+        if self.bildstil == "eigen":
+            basis = self._stil_saeubern(self.stil_eigen, uebersetzen=True)
+        else:
+            basis = BILDSTILE[self.bildstil]
+        stimmung = self._stil_saeubern(stimmung) if stimmung else ""
+        return f"{basis}, {stimmung}" if stimmung else basis
+
+    def _stil_saeubern(self, stil: str, uebersetzen: bool = False) -> str:
         """Motive aus dem Stil entfernen: er hängt an JEDEM Bildauftrag – stand darin „event horizon glows“, zeigte jedes
         Bild ein Schwarzes Loch (2026-10-20; die Anweisung in der Gliederung allein befolgte das Modell nicht)."""
         try:
-            erg = qwen_json("You clean an art style phrase for image prompts. Remove every subject, object, creature, place "
+            erg = qwen_json(("The user describes, in any language, the art style they want for all pictures of a slide "
+                             "show. Turn it into an English style phrase for an image generator. " if uebersetzen else
+                             "You clean an art style phrase for image prompts. ")
+                            + "Remove every subject, object, creature, place "
                             "and motif (e.g. 'black hole', 'nebulae', 'ships', 'event horizon glows', 'castle'). Keep only "
                             "how it is rendered: medium, technique, colour palette, light, texture, film or paper look. "
                             "Answer only with JSON: \"stil\" (English, max 20 words).", stil, {"stil": TEXT},
@@ -1587,7 +1934,7 @@ class Handler(BaseHTTPRequestHandler):
             if len(teile) != 4 or not re.fullmatch(r"[0-9a-f]{10}", teile[2]):
                 return self.send_error(404)
             name = Path(urllib.parse.unquote(teile[3])).name
-            typ = {".png": "image/png", ".wav": "audio/wav"}.get(Path(name).suffix.lower(),
+            typ = {".png": "image/png", ".wav": "audio/wav", ".webp": "image/webp"}.get(Path(name).suffix.lower(),
                                                                  MUSIK_ENDUNGEN.get(Path(name).suffix.lower(), "application/octet-stream"))
             return self._datei(VORTRAEGE_DIR / teile[2] / name, typ)
         m = re.fullmatch(r"/api/vortrag/([0-9a-f]{10})", pfad)
@@ -1619,7 +1966,8 @@ class Handler(BaseHTTPRequestHandler):
             for alt in list(VORTRAEGE.values()):   # nur ein Vortrag zur Zeit (eine Grafikkarte)
                 alt.stoppen()
             alte_vortraege_loeschen()
-            v = Vortrag(thema, minuten, musik, anfrage.get("figuren") is not False, str(anfrage.get("sprache", "de")))
+            v = Vortrag(thema, minuten, musik, anfrage.get("figuren") is not False, str(anfrage.get("sprache", "de")),
+                        str(anfrage.get("bildstil", "foto")), str(anfrage.get("stil_eigen", "")).strip()[:200])
             VORTRAEGE[v.id] = v
             log(f"Neuer Vortrag {v.id}: {minuten} min, Musik {musik}: {thema[:80]}")
             return self._json(200, {"id": v.id})

@@ -81,6 +81,11 @@
   .wahl input[type=checkbox] + label::before { content: "○ "; }
   .wahl input[type=checkbox]:checked + label::before { content: "● "; color: var(--akzent); }
   .wahl input:focus-visible + label { box-shadow: 0 0 0 3px rgba(227,165,74,.3); }
+  .eingabe {
+    width: 100%; margin-top: 8px; padding: 10px 14px; border-radius: 10px;
+    background: #0f0d0b; color: var(--text); border: 1px solid var(--karte-rand); font: 1rem var(--serif); outline: none;
+  }
+  .eingabe:focus { border-color: var(--akzent); box-shadow: 0 0 0 3px rgba(227,165,74,.18); }
   #los {
     width: 100%; margin-top: 26px; padding: 15px; border: 0; border-radius: 12px;
     background: var(--akzent); color: #1b130a; font-size: 1.1rem; font-weight: 600; letter-spacing: .02em;
@@ -142,6 +147,34 @@
     will-change: transform;
   }
   .dia img { width: 100%; height: 100%; object-fit: cover; display: block; filter: saturate(1.04) contrast(1.02); }
+  /* Bildeffekte wie in Dopewars (Wunsch des Nutzers 2026-10-31): Kamerafahrt (Ken Burns) über die ganze Szene, darin
+     2.5D – das Bild liegt dreimal übereinander (fern, Mittelgrund, Vordergrund per Tiefenmaske) und die Ebenen wandern
+     verschieden weit; dazu flackernde Lichthöfe auf Lampen, Filmkorn und Vignette. Nur transform/opacity animiert. */
+  .szene { position: absolute; inset: 0; animation: kamerafahrt var(--fahrt, 26s) ease-in-out both; will-change: transform; }
+  @keyframes kamerafahrt { from { transform: var(--kb-a, scale(1.04)); } to { transform: var(--kb-b, scale(1.14)); } }
+  .szene > img { position: absolute; inset: 0; }
+  .szene > img.ebene {
+    mask-size: 100% 100%; -webkit-mask-size: 100% 100%; mask-repeat: no-repeat; -webkit-mask-repeat: no-repeat;
+    animation: parallaxe var(--fahrt, 26s) ease-in-out both; opacity: 0; transition: opacity .8s;
+  }
+  .szene > img.ebene.da { opacity: 1; }
+  @keyframes parallaxe {
+    from { transform: translate(calc(var(--px) * -1), calc(var(--py) * -1)) scale(var(--ps, 1)); }
+    to { transform: translate(var(--px), var(--py)) scale(var(--ps, 1)); }
+  }
+  .lampen { position: absolute; inset: 0; pointer-events: none; mix-blend-mode: screen; }
+  .lampe {
+    position: absolute; border-radius: 50%; animation: lampenflackern 3.2s ease-in-out infinite;
+    background: radial-gradient(circle, rgba(var(--lc), .6) 0%, rgba(var(--lc), .22) 30%, rgba(var(--lc), 0) 70%);
+  }
+  @keyframes lampenflackern { 0%, 100% { opacity: .8; } 35% { opacity: 1; } 38% { opacity: .55; } 41% { opacity: .95; } 70% { opacity: .75; } }
+  .korn {
+    position: absolute; inset: -50%; pointer-events: none; opacity: .11; mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='k'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='100%' height='100%' filter='url(%23k)'/></svg>");
+    animation: kornspringen .5s steps(5) infinite;
+  }
+  @keyframes kornspringen { 0% { transform: translate(0, 0); } 20% { transform: translate(-7%, 4%); } 40% { transform: translate(5%, -6%); } 60% { transform: translate(-3%, -8%); } 80% { transform: translate(8%, 3%); } 100% { transform: translate(0, 0); } }
+  @media (prefers-reduced-motion: reduce) { .szene, .szene > img.ebene, .korn, .lampe { animation: none; } }
   .dia.rein { transform: translateX(0); transition: transform .62s cubic-bezier(.2,.75,.25,1); }
   .dia.raus { transform: translateX(-112%); transition: transform .5s cubic-bezier(.6,0,.85,.4); }
   .dia .aufschrift {
@@ -275,6 +308,17 @@
     </div>
 
     <div class="musik">
+      <label class="feld" data-t="bildstil">Bildstil</label>
+      <div class="wahl zwei" role="radiogroup">
+        <input type="radio" name="bildstil" id="s-foto" value="foto" checked><label for="s-foto" data-t="s_foto">Fotorealistisch</label>
+        <input type="radio" name="bildstil" id="s-aquarell" value="aquarell"><label for="s-aquarell" data-t="s_aquarell">Aquarellfarben</label>
+        <input type="radio" name="bildstil" id="s-anime" value="anime"><label for="s-anime" data-t="s_anime">Anime</label>
+        <input type="radio" name="bildstil" id="s-eigen" value="eigen"><label for="s-eigen" data-t="s_eigen">Sonstige</label>
+      </div>
+      <input type="text" id="stilEigen" class="eingabe versteckt" maxlength="200" data-t-ph="s_eigen_ph" placeholder="z. B. Ölgemälde im Stil der alten Meister">
+    </div>
+
+    <div class="musik">
       <label class="feld" data-t="musik">Hintergrundmusik</label>
       <div class="wahl" role="radiogroup">
         <input type="radio" name="musik" id="m-ordner" value="ordner" checked><label for="m-ordner" data-t="m_ordner">Aus dem Musikordner</label>
@@ -319,6 +363,7 @@
       </div>
     </div>
     <div class="vignette"></div>
+    <div class="korn" aria-hidden="true"></div>
   </div>
   <div class="untertitel" id="untertitel">
     <div class="ueberschrift" id="ueberschrift"></div>
@@ -521,6 +566,32 @@ const TEXTE = {
     m_bereit: "Слайд {k} из {n} готов …",
   },
 };
+// Bildstil (Wunsch des Nutzers 2026-10-31) und die Meldung beim Geschichten-Vortrag
+const TEXTE_STIL = {
+  de: { bildstil: "Bildstil", s_foto: "Fotorealistisch", s_aquarell: "Aquarellfarben", s_anime: "Anime", s_eigen: "Sonstige",
+        s_eigen_ph: "Eigener Stil, z. B. Ölgemälde wie die alten Meister", err_stil: "Bitte den gewünschten Bildstil beschreiben.",
+        m_geschichte: "Die Geschichte entsteht …" },
+  en: { bildstil: "Picture style", s_foto: "Photorealistic", s_aquarell: "Watercolour", s_anime: "Anime", s_eigen: "Other",
+        s_eigen_ph: "Your own style, e.g. oil painting like the old masters", err_stil: "Please describe the picture style you want.",
+        m_geschichte: "Creating the story …" },
+  fr: { bildstil: "Style d'image", s_foto: "Photoréaliste", s_aquarell: "Aquarelle", s_anime: "Anime", s_eigen: "Autre",
+        s_eigen_ph: "Votre style, p. ex. peinture à l'huile des maîtres anciens", err_stil: "Veuillez décrire le style d'image souhaité.",
+        m_geschichte: "L'histoire s'écrit …" },
+  es: { bildstil: "Estilo de imagen", s_foto: "Fotorrealista", s_aquarell: "Acuarela", s_anime: "Anime", s_eigen: "Otro",
+        s_eigen_ph: "Tu estilo, p. ej. pintura al óleo de los viejos maestros", err_stil: "Describe el estilo de imagen que quieres.",
+        m_geschichte: "Creando la historia …" },
+  it: { bildstil: "Stile delle immagini", s_foto: "Fotorealistico", s_aquarell: "Acquerello", s_anime: "Anime", s_eigen: "Altro",
+        s_eigen_ph: "Il tuo stile, ad es. pittura a olio dei grandi maestri", err_stil: "Descrivi lo stile delle immagini che desideri.",
+        m_geschichte: "La storia prende forma …" },
+  pt: { bildstil: "Estilo de imagem", s_foto: "Fotorrealista", s_aquarell: "Aguarela", s_anime: "Anime", s_eigen: "Outro",
+        s_eigen_ph: "O seu estilo, p. ex. pintura a óleo dos grandes mestres", err_stil: "Descreva o estilo de imagem que pretende.",
+        m_geschichte: "A história está a nascer …" },
+  ru: { bildstil: "Стиль изображений", s_foto: "Фотореализм", s_aquarell: "Акварель", s_anime: "Аниме", s_eigen: "Другой",
+        s_eigen_ph: "Свой стиль, например масляная живопись старых мастеров", err_stil: "Опишите желаемый стиль изображений.",
+        m_geschichte: "Создаётся история …" },
+};
+for (const [code, texte] of Object.entries(TEXTE_STIL)) Object.assign(TEXTE[code], texte);
+
 let sprache = "de";
 try {
   const gemerkt = localStorage.getItem("diashow-sprache");
@@ -538,6 +609,7 @@ const SERVER_MELDUNGEN = {
   "Der Projektor wärmt sich auf …": "warm", "Sprachmodell wird gefragt …": "m_frage", "Die Gliederung entsteht …": "m_gliederung",
   "Die Gliederung wird gegengeprüft …": "m_pruefen", "Das Titelbild wird gemalt …": "m_titelbild",
   "Die ersten Dias werden vorbereitet …": "m_erste", "Die Stimme wird geladen …": "m_stimme",
+  "Die Geschichte entsteht …": "m_geschichte",
 };
 function meldungUebersetzen(text) {
   if (!text) return "";
@@ -568,6 +640,20 @@ for (const id of ["x-figuren", "x-saal"]) {
   try { const v = localStorage.getItem("diashow-" + id); if (v !== null) $(id).checked = v === "1"; } catch (e) {}
   $(id).addEventListener("change", () => { try { localStorage.setItem("diashow-" + id, $(id).checked ? "1" : "0"); } catch (e) {} });
 }
+// Bildstil: Wahl und eigener Stil werden gemerkt; das Eingabefeld erscheint nur bei „Sonstige“
+const bildstilWahl = () => document.querySelector("input[name=bildstil]:checked").value;
+function stilFeldZeigen() { $("stilEigen").classList.toggle("versteckt", bildstilWahl() !== "eigen"); }
+try {
+  const s = localStorage.getItem("diashow-bildstil"); if (s && $("s-" + s)) $("s-" + s).checked = true;
+  $("stilEigen").value = localStorage.getItem("diashow-stil-eigen") || "";
+} catch (e) {}
+stilFeldZeigen();
+document.querySelectorAll("input[name=bildstil]").forEach((r) => r.addEventListener("change", () => {
+  stilFeldZeigen();
+  if (bildstilWahl() === "eigen") $("stilEigen").focus();
+  try { localStorage.setItem("diashow-bildstil", bildstilWahl()); } catch (e) {}
+}));
+$("stilEigen").addEventListener("input", () => { try { localStorage.setItem("diashow-stil-eigen", $("stilEigen").value); } catch (e) {} });
 
 let dienstStand;   // undefined = noch nicht gefragt, null = Server nicht erreichbar
 function diensteMalen() {
@@ -813,12 +899,32 @@ function fxGroesse() {
 addEventListener("resize", fxGroesse);
 fxGroesse();
 
+// Weitere Effekte (Wunsch des Nutzers 2026-10-31: Sprühregen, Glitzer, Feuer, Rauch, „alles, was eine Diashow
+// unterhaltsam macht“); Schnee und Regen in drei Tiefenebenen wie in Dopewars (nah = größer, schneller, heller).
+const ebene = () => [.45, .7, 1][Math.floor(zufall(0, 3))];
+const BLATTFARBEN = ["#c8682d", "#d9952f", "#a8432a", "#e0b03c", "#8a5a2b"];
+const BLUETENFARBEN = ["#f6c6d6", "#f9dde6", "#f3a9c1", "#fff2f6"];
+const FEUERWERKFARBEN = ["255,207,74", "56,217,255", "255,43,214", "62,240,161", "255,85,119", "138,92,255"];
+
 function fxTeile(name) {
   const W = innerWidth, H = innerHeight, n = (k) => Math.round(k * Math.min(1.6, (W * H) / (1600 * 900)));
   const neu = (f, anzahl) => Array.from({ length: n(anzahl) }, f);
+  effekt.extra = [];   // kurzlebige Teile: Spritzer, Feuerwerksfunken
+  effekt.blitz = 0; effekt.blitzPfad = null; effekt.naechsterBlitz = zufall(2, 6); effekt.naechsteRakete = 0.5;
   switch (name) {
-    case "schnee": return neu(() => ({ x: zufall(0, W), y: zufall(-H, H), r: zufall(1.2, 3.8), v: zufall(25, 70), p: zufall(0, 6) }), 150);
-    case "regen": return neu(() => ({ x: zufall(0, W * 1.2), y: zufall(-H, H), l: zufall(12, 26), v: zufall(650, 950) }), 230);
+    case "schnee": return neu(() => { const z = ebene(); return { x: zufall(0, W), y: zufall(-H, H), z, r: z * zufall(1.3, 3.6), v: z * zufall(35, 75), p: zufall(0, 6) }; }, 190);
+    case "regen":
+    case "gewitter": return neu(() => { const z = ebene(); return { x: zufall(0, W * 1.2), y: zufall(-H, H), z, l: z * zufall(16, 32), v: z * zufall(800, 1100) }; }, name === "gewitter" ? 260 : 230);
+    case "spruehregen": return neu(() => ({ x: zufall(0, W * 1.1), y: zufall(-H, H), l: zufall(3, 8), v: zufall(260, 420), a: zufall(.15, .4) }), 420);
+    case "feuer": return neu(() => ({ x: zufall(-20, W + 20), y: H + zufall(0, H * .4), v: zufall(60, 150), r: zufall(10, 34), a: 1, p: zufall(0, 6) }), 140);
+    case "rauch": return neu(() => ({ x: zufall(-W * .1, W * 1.1), y: zufall(H * .2, H * 1.3), v: zufall(12, 30), r: zufall(H * .08, H * .2), wachs: zufall(6, 18), p: zufall(0, 6), a: zufall(.05, .12) }), 26);
+    case "glitzer": return neu(() => ({ x: zufall(0, W), y: zufall(-H, H), v: zufall(18, 45), r: zufall(.8, 2.4), p: zufall(0, 6), gold: Math.random() < .7 }), 170);
+    case "feuerwerk": return [];
+    case "blaetter": return neu(() => ({ x: zufall(0, W), y: zufall(-H, H), v: zufall(40, 85), w: zufall(9, 17), d: zufall(0, 6), s: zufall(-2, 2), p: zufall(0, 6), c: BLATTFARBEN[Math.floor(zufall(0, BLATTFARBEN.length))] }), 45);
+    case "blueten": return neu(() => ({ x: zufall(-W * .2, W), y: zufall(-H, H), v: zufall(30, 60), w: zufall(5, 9), d: zufall(0, 6), s: zufall(-3, 3), p: zufall(0, 6), c: BLUETENFARBEN[Math.floor(zufall(0, BLUETENFARBEN.length))] }), 90);
+    case "sonnenstrahlen": return Array.from({ length: 6 }, (_, i) => ({ winkel: .35 + i * .13 + zufall(-.03, .03), breite: zufall(.025, .06), p: zufall(0, 6), f: zufall(.15, .35) }));
+    case "staub": return neu(() => ({ x: zufall(0, W), y: zufall(0, H), vx: zufall(-6, 6), vy: zufall(-5, 5), r: zufall(.6, 1.8), p: zufall(0, 6) }), 140);
+    case "herzen": return neu(() => ({ x: zufall(0, W), y: zufall(H * .3, H * 1.4), v: zufall(30, 60), r: zufall(6, 15), p: zufall(0, 6), c: Math.random() < .6 ? "235,90,120" : "250,160,185" }), 32);
     case "sterne": return neu(() => ({ x: zufall(0, W), y: zufall(0, H), r: zufall(.5, 1.8), f: zufall(.6, 2.2), p: zufall(0, 6) }), 200);
     case "funken": return neu(() => ({ x: zufall(0, W), y: zufall(H * .4, H * 1.1), vx: zufall(-25, 25), v: zufall(40, 120), r: zufall(1.3, 3.2), a: zufall(.3, 1) }), 130);
     case "nebel": return neu(() => ({ x: zufall(-W * .3, W), y: zufall(H * .3, H), r: zufall(H * .25, H * .5), v: zufall(6, 18) }), 9);
@@ -854,14 +960,92 @@ function fxSchritt(t) {
   fx.globalAlpha = effekt.staerke;
   for (const q of effekt.teile) {
     switch (effekt.name) {
-      case "schnee":
-        q.y += q.v * dt; q.x += Math.sin(u * .8 + q.p) * 18 * dt;
+      case "schnee": {
+        const wind = Math.sin(u * .23) * 22;
+        q.y += q.v * dt; q.x += (Math.sin(u * .8 + q.p) * 18 + wind) * q.z * dt;
         if (q.y > H + 5) { q.y = -5; q.x = zufall(0, W); }
-        fx.fillStyle = "rgba(255,255,255,.85)"; fx.beginPath(); fx.arc(q.x, q.y, q.r, 0, 7); fx.fill(); break;
+        if (q.x > W + 5) q.x = -5; else if (q.x < -5) q.x = W + 5;
+        fx.fillStyle = `rgba(240,246,255,${.35 + .55 * q.z})`; fx.beginPath(); fx.arc(q.x, q.y, q.r, 0, 7); fx.fill(); break;
+      }
       case "regen":
+      case "gewitter":
         q.y += q.v * dt; q.x -= q.v * .18 * dt;
-        if (q.y > H) { q.y = zufall(-60, -10); q.x = zufall(0, W * 1.2); }
-        fx.strokeStyle = "rgba(190,210,240,.45)"; fx.lineWidth = 1.1; fx.beginPath(); fx.moveTo(q.x, q.y); fx.lineTo(q.x + q.l * .18, q.y - q.l); fx.stroke(); break;
+        if (q.y > H * (.86 + .14 * q.z)) {   // nahe Tropfen spritzen am Boden auf
+          if (q.z === 1 && effekt.extra.length < 60) effekt.extra.push({ art: "spritzer", x: q.x, y: q.y, t: 0 });
+          q.y = zufall(-60, -10); q.x = zufall(0, W * 1.2);
+        }
+        fx.strokeStyle = `rgba(185,205,240,${.18 + .32 * q.z})`; fx.lineWidth = .6 + .7 * q.z;
+        fx.beginPath(); fx.moveTo(q.x, q.y); fx.lineTo(q.x + q.l * .18, q.y - q.l); fx.stroke(); break;
+      case "spruehregen":
+        q.y += q.v * dt; q.x -= q.v * .3 * dt + Math.sin(u + q.y * .01) * 8 * dt;
+        if (q.y > H) { q.y = zufall(-30, -5); q.x = zufall(0, W * 1.1); }
+        fx.strokeStyle = `rgba(210,222,240,${q.a})`; fx.lineWidth = .7;
+        fx.beginPath(); fx.moveTo(q.x, q.y); fx.lineTo(q.x + q.l * .3, q.y - q.l); fx.stroke(); break;
+      case "feuer": {   // Flammenzungen vom unteren Rand: gelb -> orange -> rot, dann verglimmen
+        q.y -= q.v * dt; q.x += Math.sin(u * 4 + q.p) * 22 * dt; q.a -= dt * .55;
+        if (q.a <= 0) { q.x = zufall(-20, W + 20); q.y = H + zufall(0, 40); q.a = 1; q.r = zufall(10, 34); }
+        const r = q.r * (.35 + .65 * q.a);
+        const farbe = q.a > .7 ? "255,220,120" : q.a > .4 ? "255,140,40" : "200,50,20";
+        fx.globalCompositeOperation = "lighter";
+        const g = fx.createRadialGradient(q.x, q.y, 0, q.x, q.y, r);
+        g.addColorStop(0, `rgba(${farbe},${.32 * q.a})`); g.addColorStop(1, `rgba(${farbe},0)`);
+        fx.fillStyle = g; fx.fillRect(q.x - r, q.y - r, r * 2, r * 2);
+        fx.globalCompositeOperation = "source-over"; break;
+      }
+      case "rauch": {
+        q.y -= q.v * dt; q.x += (Math.sin(u * .2 + q.p) * 10 + 6) * dt; q.r += q.wachs * dt;
+        if (q.y + q.r < 0) { q.y = H + zufall(0, H * .3); q.x = zufall(-W * .1, W); q.r = zufall(H * .08, H * .2); }
+        const g = fx.createRadialGradient(q.x, q.y, 0, q.x, q.y, q.r);
+        g.addColorStop(0, `rgba(150,148,145,${q.a})`); g.addColorStop(1, "rgba(150,148,145,0)");
+        fx.fillStyle = g; fx.fillRect(q.x - q.r, q.y - q.r, q.r * 2, q.r * 2); break;
+      }
+      case "glitzer": {   // feine Flitter rieseln und funkeln; ab und zu ein Stern-Glanz
+        q.y += q.v * dt; q.x += Math.sin(u * 1.5 + q.p) * 10 * dt;
+        if (q.y > H + 5) { q.y = -5; q.x = zufall(0, W); }
+        const tw = .5 + .5 * Math.sin(u * 7 + q.p);
+        const farbe = q.gold ? "255,215,110" : "255,255,255";
+        fx.globalCompositeOperation = "lighter";
+        fx.fillStyle = `rgba(${farbe},${.25 + .75 * tw})`; fx.beginPath(); fx.arc(q.x, q.y, q.r, 0, 7); fx.fill();
+        if (tw > .97) {
+          fx.strokeStyle = `rgba(${farbe},.8)`; fx.lineWidth = .8; fx.beginPath();
+          fx.moveTo(q.x - q.r * 5, q.y); fx.lineTo(q.x + q.r * 5, q.y); fx.moveTo(q.x, q.y - q.r * 5); fx.lineTo(q.x, q.y + q.r * 5); fx.stroke();
+        }
+        fx.globalCompositeOperation = "source-over"; break;
+      }
+      case "blaetter":
+      case "blueten": {   // taumeln beim Fallen: Drehung plus „Kippen“ (Breite schwankt)
+        const seit = effekt.name === "blueten" ? 30 : 0;
+        q.y += q.v * dt; q.x += (Math.sin(u * 1.1 + q.p) * 40 + seit) * dt; q.d += q.s * dt;
+        if (q.y > H + 20) { q.y = -20; q.x = zufall(-W * .1, W); }
+        if (q.x > W + 20) q.x = -20;
+        fx.save(); fx.translate(q.x, q.y); fx.rotate(q.d); fx.scale(1, .35 + .65 * Math.abs(Math.cos(u * 2 + q.p)));
+        fx.fillStyle = q.c; fx.globalAlpha = effekt.staerke * .9;
+        fx.beginPath(); fx.ellipse(0, 0, q.w, q.w * (effekt.name === "blueten" ? .7 : .45), 0, 0, 7); fx.fill();
+        if (effekt.name === "blaetter") { fx.strokeStyle = "rgba(60,30,10,.45)"; fx.lineWidth = .8; fx.beginPath(); fx.moveTo(-q.w, 0); fx.lineTo(q.w, 0); fx.stroke(); }
+        fx.restore(); fx.globalAlpha = effekt.staerke; break;
+      }
+      case "sonnenstrahlen": {   // breite Lichtbahnen von oben links, atmen langsam
+        const a = q.f * (.6 + .4 * Math.sin(u * .4 + q.p));
+        const x0 = -W * .05, y0 = -H * .1, l = Math.hypot(W, H) * 1.2;
+        fx.save(); fx.translate(x0, y0); fx.rotate(q.winkel);
+        const g = fx.createLinearGradient(0, 0, l, 0);
+        g.addColorStop(0, `rgba(255,236,190,${a})`); g.addColorStop(1, "rgba(255,236,190,0)");
+        fx.globalCompositeOperation = "lighter"; fx.fillStyle = g;
+        fx.beginPath(); fx.moveTo(0, 0); fx.lineTo(l, -l * q.breite); fx.lineTo(l, l * q.breite); fx.closePath(); fx.fill();
+        fx.restore(); fx.globalCompositeOperation = "source-over"; break;
+      }
+      case "staub": {   // Staubkörnchen schweben im Licht
+        q.x += (q.vx + Math.sin(u * .3 + q.p) * 4) * dt; q.y += (q.vy + Math.cos(u * .25 + q.p) * 4) * dt;
+        if (q.x < 0) q.x = W; else if (q.x > W) q.x = 0; if (q.y < 0) q.y = H; else if (q.y > H) q.y = 0;
+        fx.fillStyle = `rgba(255,240,210,${.15 + .5 * Math.max(0, Math.sin(u * .9 + q.p))})`;
+        fx.beginPath(); fx.arc(q.x, q.y, q.r, 0, 7); fx.fill(); break;
+      }
+      case "herzen": {
+        q.y -= q.v * dt; q.x += Math.sin(u * 1.3 + q.p) * 25 * dt;
+        if (q.y < -20) { q.y = H + 20; q.x = zufall(0, W); }
+        const a = Math.min(1, q.y / (H * .5)) * .75;
+        fx.fillStyle = `rgba(${q.c},${a})`; herz(q.x, q.y, q.r); break;
+      }
       case "sterne":
         fx.fillStyle = `rgba(255,250,235,${.35 + .65 * Math.abs(Math.sin(u * q.f + q.p))})`; fx.beginPath(); fx.arc(q.x, q.y, q.r, 0, 7); fx.fill(); break;
       case "funken":
@@ -905,7 +1089,86 @@ function fxSchritt(t) {
       if (s.t > 1.2) effekt.schnuppe = null;
     }
   }
+  fxExtras(dt, W, H);
   fx.globalAlpha = 1;
+}
+
+function herz(x, y, r) {
+  fx.beginPath(); fx.moveTo(x, y + r * .35);
+  fx.bezierCurveTo(x - r * 1.1, y - r * .45, x - r * .45, y - r * 1.15, x, y - r * .45);
+  fx.bezierCurveTo(x + r * .45, y - r * 1.15, x + r * 1.1, y - r * .45, x, y + r * .35);
+  fx.fill();
+}
+
+// Was nicht als feste Teilchenmenge läuft: Regenspritzer, Blitze, Feuerwerk, Glut am unteren Rand beim Feuer
+function fxExtras(dt, W, H) {
+  const name = effekt.name;
+  if (name === "feuer" || name === "rauch") {   // Glutschein von unten
+    const g = fx.createLinearGradient(0, H, 0, H * .7);
+    const flackern = .75 + .25 * Math.sin(effekt.uhr * 9) * Math.sin(effekt.uhr * 3.7);
+    g.addColorStop(0, name === "feuer" ? `rgba(255,110,30,${.22 * flackern})` : "rgba(90,85,80,.18)");
+    g.addColorStop(1, "rgba(255,110,30,0)");
+    fx.fillStyle = g; fx.fillRect(0, H * .7, W, H * .3);
+  }
+  if (name === "spruehregen") {   // feuchter Dunst über allem
+    fx.fillStyle = `rgba(200,210,225,${.05 + .02 * Math.sin(effekt.uhr * .5)})`; fx.fillRect(0, 0, W, H);
+  }
+  if (name === "gewitter") {
+    effekt.naechsterBlitz -= dt;
+    if (effekt.naechsterBlitz <= 0) {
+      effekt.naechsterBlitz = zufall(4, 11); effekt.blitz = 1;
+      const pfad = []; let x = zufall(W * .15, W * .85), y = 0;
+      while (y < H * zufall(.35, .6)) { pfad.push([x, y]); x += zufall(-30, 30); y += H * zufall(.03, .07); }
+      effekt.blitzPfad = pfad;
+    }
+    if (effekt.blitz > 0) {
+      effekt.blitz -= dt * 3.2;
+      const a = Math.max(0, effekt.blitz) * (Math.random() < .3 ? .4 : 1);   // flackert
+      fx.fillStyle = `rgba(225,232,255,${.28 * a})`; fx.fillRect(0, 0, W, H);
+      if (effekt.blitzPfad && effekt.blitz > .45) {
+        fx.strokeStyle = `rgba(240,245,255,${a})`; fx.lineWidth = 2.2; fx.shadowColor = "rgba(180,200,255,.9)"; fx.shadowBlur = 14;
+        fx.beginPath(); effekt.blitzPfad.forEach(([x, y], i) => (i ? fx.lineTo(x, y) : fx.moveTo(x, y))); fx.stroke(); fx.shadowBlur = 0;
+      }
+    }
+  }
+  if (name === "feuerwerk") {
+    effekt.naechsteRakete -= dt;
+    if (effekt.naechsteRakete <= 0 && effekt.extra.length < 500) {
+      effekt.naechsteRakete = zufall(.7, 1.8);
+      effekt.extra.push({ art: "rakete", x: zufall(W * .1, W * .9), y: H, vy: -zufall(H * .6, H * .85), ziel: zufall(H * .12, H * .45),
+                          c: FEUERWERKFARBEN[Math.floor(zufall(0, FEUERWERKFARBEN.length))], t: 0 });
+    }
+  }
+  if (!effekt.extra || !effekt.extra.length) return;
+  fx.globalCompositeOperation = "lighter";
+  const neu = [];
+  for (const e of effekt.extra) {
+    e.t += dt;
+    if (e.art === "spritzer") {
+      if (e.t > .25) continue;
+      fx.strokeStyle = `rgba(200,215,240,${.5 * (1 - e.t / .25)})`; fx.lineWidth = .8;
+      fx.beginPath(); fx.ellipse(e.x, e.y, 2 + e.t * 26, 1 + e.t * 6, 0, 0, 7); fx.stroke();
+    } else if (e.art === "rakete") {
+      e.y += e.vy * dt;
+      fx.strokeStyle = `rgba(${e.c},.9)`; fx.lineWidth = 2; fx.beginPath(); fx.moveTo(e.x, e.y); fx.lineTo(e.x, e.y + 14); fx.stroke();
+      if (e.y > e.ziel) continue;
+      for (let i = 0; i < 70; i++) {   // zerplatzt in einen Funkenkranz
+        const w = zufall(0, Math.PI * 2), v = zufall(60, 230);
+        neu.push({ art: "funke", x: e.x, y: e.y, vx: Math.cos(w) * v, vy: Math.sin(w) * v, c: e.c, t: 0, leben: zufall(1.1, 1.9) });
+      }
+      e.t = 99;
+    } else if (e.art === "funke") {
+      if (e.t > e.leben) continue;
+      e.vx *= Math.exp(-1.3 * dt); e.vy = e.vy * Math.exp(-1.3 * dt) + 70 * dt;
+      e.x += e.vx * dt; e.y += e.vy * dt;
+      const a = 1 - e.t / e.leben;
+      fx.strokeStyle = `rgba(${e.c},${a})`; fx.lineWidth = 2;
+      fx.beginPath(); fx.moveTo(e.x, e.y); fx.lineTo(e.x - e.vx * .05, e.y - e.vy * .05); fx.stroke();
+    }
+    if (e.t < 99) neu.push(e);
+  }
+  effekt.extra = neu;
+  fx.globalCompositeOperation = "source-over";
 }
 requestAnimationFrame(fxSchritt);
 
@@ -960,6 +1223,8 @@ $("projektor").addEventListener("mousemove", zeigerAnzeigen);
 async function starten() {
   const thema = $("thema").value.trim();
   if (!thema) { $("startfehler").textContent = t("err_thema"); $("thema").focus(); return; }
+  const bildstil = bildstilWahl(), stilEigen = $("stilEigen").value.trim();
+  if (bildstil === "eigen" && !stilEigen) { $("startfehler").textContent = t("err_stil"); $("stilEigen").focus(); return; }
   try { localStorage.setItem("diashow-thema", thema); } catch (e) {}
   $("startfehler").textContent = "";
   $("los").disabled = true;
@@ -976,7 +1241,8 @@ async function starten() {
   let id;
   try {
     const antwort = await fetch("/api/vortrag", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ thema, minuten: Number(minuten.value), musik: modus, figuren: $("x-figuren").checked, sprache }) });
+      body: JSON.stringify({ thema, minuten: Number(minuten.value), musik: modus, figuren: $("x-figuren").checked, sprache,
+                             bildstil, stil_eigen: bildstil === "eigen" ? stilEigen : "" }) });
     const d = await antwort.json();
     if (!antwort.ok) throw new Error(d.fehler || t("err_start"));
     id = d.id;
@@ -1071,8 +1337,46 @@ function bildLaden(src) {
   });
 }
 
+// Szene eines Dias wie in Dopewars (js/stagefx.js): eigene Kamerafahrt je Bild, 2.5D-Ebenen aus der Tiefenkarte
+// (Mittelgrund und Vordergrund wandern weiter als der Hintergrund), Lichthöfe auf Lampen.
+function szeneBauen(src, sekunden) {
+  const szene = document.createElement("div");
+  szene.className = "szene";
+  const r = (a, b) => a + Math.random() * (b - a);
+  const rx = Math.random() < .5 ? -1 : 1, ry = Math.random() < .5 ? -1 : 1;
+  szene.style.setProperty("--kb-a", `scale(${r(1.03, 1.07).toFixed(3)}) translate(${(rx * r(0, 1.5)).toFixed(2)}%, ${r(-1, 1).toFixed(2)}%)`);
+  szene.style.setProperty("--kb-b", `scale(${r(1.11, 1.17).toFixed(3)}) translate(${(-rx * r(1.5, 3)).toFixed(2)}%, ${(ry * r(0, 2)).toFixed(2)}%)`);
+  szene.style.setProperty("--fahrt", `${Math.max(8, sekunden).toFixed(1)}s`);
+  const img = document.createElement("img"); img.src = src; img.alt = ""; szene.appendChild(img);
+  const info = (lauf && lauf.stand && lauf.stand.tiefen && lauf.stand.tiefen[src]) || null;
+  if (info && info.mid && info.near) {
+    for (const [maske, weite, zoom] of [[info.mid, .9, 1.005], [info.near, 1.9, 1.02]]) {
+      const ebene = document.createElement("img");
+      ebene.className = "ebene"; ebene.src = src; ebene.alt = "";
+      ebene.style.maskImage = ebene.style.webkitMaskImage = `url(${maske})`;
+      ebene.style.setProperty("--px", `${(rx * weite).toFixed(2)}%`);
+      ebene.style.setProperty("--py", `${(ry * weite * .4).toFixed(2)}%`);
+      ebene.style.setProperty("--ps", zoom);
+      const m = new Image(); m.onload = () => ebene.classList.add("da"); m.src = maske;   // erst zeigen, wenn die Maske da ist
+      szene.appendChild(ebene);
+    }
+  }
+  if (info && info.lampen && info.lampen.length) {
+    const schicht = document.createElement("div"); schicht.className = "lampen";
+    for (const l of info.lampen) {
+      const d = Math.max(3, l.r * 1.6) * 2;
+      const lampe = document.createElement("i"); lampe.className = "lampe";
+      Object.assign(lampe.style, { left: `${l.x - d / 2}%`, top: `${l.y - d / 2}%`, width: `${d}%`, height: `${d}%`, animationDelay: `${(-Math.random() * 3).toFixed(2)}s` });
+      lampe.style.setProperty("--lc", l.c);
+      schicht.appendChild(lampe);
+    }
+    szene.appendChild(schicht);
+  }
+  return szene;
+}
+
 let letztesBild = null;
-async function diaWechsel(src, zusatz, spannungspause = 0) {
+async function diaWechsel(src, zusatz, spannungspause = 0, sekunden = 26) {
   src = src || letztesBild;
   await bildLaden(src);
   const alt = document.querySelector(".leinwand .dia.rein");
@@ -1095,7 +1399,7 @@ async function diaWechsel(src, zusatz, spannungspause = 0) {
   $("vorbereitung").classList.add("versteckt");
   const dia = document.createElement("div");
   dia.className = "dia";
-  if (src) { const img = document.createElement("img"); img.src = src; img.alt = ""; dia.appendChild(img); letztesBild = src; }
+  if (src) { dia.appendChild(szeneBauen(src, sekunden)); letztesBild = src; }
   if (zusatz) dia.appendChild(zusatz);
   $("leinwand").insertBefore(dia, document.querySelector(".vignette"));
   void dia.offsetWidth;
@@ -1153,7 +1457,7 @@ async function vortragen(l) {
   titel.className = "aufschrift";
   titel.innerHTML = `<h2></h2><p></p>`;
   titel.querySelector("h2").textContent = s0.titel; titel.querySelector("p").textContent = s0.untertitel;
-  await diaWechsel(s0.titelbild, titel);
+  await diaWechsel(s0.titelbild, titel, 0, TITEL_MS / 1000 + 2);
   l.pos = 0;
   $("ueberschrift").textContent = ""; $("satzbox").innerHTML = "";
   await schlafen(TITEL_MS);
@@ -1173,11 +1477,12 @@ async function vortragen(l) {
     if (!dia || l.aus) return;
     if (dia === "ende") break;
     $("untertitel").style.opacity = 0;
+    const sek = (dia.dauer || 20) + PAUSE_MS / 1000 + 2;
     if (dia.rolle === "hoehepunkt") {
       musikStufe("hoch", 1400);
-      await diaWechsel(dia.bild, null, 1800);
+      await diaWechsel(dia.bild, null, 1800, sek);
     } else {
-      await diaWechsel(dia.bild);
+      await diaWechsel(dia.bild, null, 0, sek);
     }
     if (l.aus) return;
     l.pos = k;
@@ -1207,7 +1512,7 @@ async function vortragen(l) {
   ende.className = "ende"; ende.textContent = t("ende");
   musikStufe("hoch", 1500);   // die Musik trägt das Ende …
   clearTimeout(saal.uhr);     // keine Zwischengeräusche mehr – jetzt kommt der Applaus
-  await diaWechsel(l.stand.schlussbild || l.stand.titelbild, ende);
+  await diaWechsel(l.stand.schlussbild || l.stand.titelbild, ende, 0, SCHLUSS_MS / 1000 + 2);
   saalSpielen("applaus", .6);
   $("fortschritt").textContent = "";
   await schlafen(SCHLUSS_MS / 2);
