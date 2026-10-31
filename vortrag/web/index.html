@@ -1172,12 +1172,15 @@ function fxExtras(dt, W, H) {
 }
 requestAnimationFrame(fxSchritt);
 
-// ---------------- Figuren (Sprites, 100x50) ----------------
+// ---------------- Figuren (Sprites) ----------------
 // Kontextbasiert: die KI wählt je Dia eine der Figuren des Vortrags – oder keine. Bewegungsart aus der Gliederung.
-const FIGUR_ZOOM = 1.5;   // 100x50 wäre auf großen Bildschirmen winzig
-function figurStarten(sprite) {
+// In Originalgröße (Wunsch des Nutzers 2026-10-31) – nur auf schmalen Bildschirmen höchstens 40 % der Breite.
+async function figurStarten(sprite) {
   if (!sprite || !sprite.url) return;
-  const W = innerWidth, H = innerHeight, w = 100 * FIGUR_ZOOM, h = 50 * FIGUR_ZOOM;
+  const probe = new Image(); probe.src = sprite.url;
+  try { await probe.decode(); } catch (e) { return; }
+  const W = innerWidth, H = innerHeight, mass = Math.min(1, (W * .4) / probe.naturalWidth);
+  const w = Math.round(probe.naturalWidth * mass), h = Math.round(probe.naturalHeight * mass);
   const rechts = Math.random() < .5;   // die Figuren schauen nach rechts – nach links gespiegelt
   const kopien = sprite.bewegung === "fallen" ? 5 : sprite.bewegung === "schwimmen" ? 2 : 1;
   for (let c = 0; c < kopien; c++) {

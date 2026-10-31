@@ -82,9 +82,9 @@ COMFYUI_DIR = Path(os.environ.get("COMFYUI_DIR", str(PLUGINS / "ComfyUI")))
 MODELS_DIR = COMFYUI_DIR / "models"
 BILD_GROESSE = (1024, 1024)   # wie die Dias der alten Version (generate_image-Standard; Wunsch des Nutzers 2026-10-20)
 # Sprites (Wunsch des Nutzers 2026-10-20): kleine freigestellte Figuren, die ab und zu über den Bildschirm wandern.
-# Gemalt in 2:1 (FLUX braucht Fläche für Details), dann freigestellt und auf 100x50 verkleinert.
+# Gemalt in 2:1 (FLUX braucht Fläche für Details), dann freigestellt und auf den Inhalt zugeschnitten – in
+# Originalgröße, nicht mehr verkleinert (Wunsch des Nutzers 2026-10-31).
 SPRITE_MAL_GROESSE = (512, 256)
-SPRITE_GROESSE = (100, 50)
 SPRITE_BEWEGUNGEN = ("fliegen", "schweben", "laufen", "rollen", "fallen", "schwimmen")
 # Keine animierten Figuren, sondern in ihrer Bewegung GEMALT (Wunsch des Nutzers 2026-10-20: „ein Vogel fliegt, ein
 # Mensch geht, eine Rakete stößt Feuer aus – leblose Gegenstände bleiben, wie sie sind“).
@@ -409,8 +409,8 @@ def _weiss_entfernen(bild):
 
 
 def sprite_freistellen(quelle: Path, ziel: Path) -> bool:
-    """Figur freistellen (rembg, sonst weißen Hintergrund entfernen), auf den Inhalt zuschneiden und mittig in
-    SPRITE_GROESSE (100x50) setzen. False, wenn nichts Brauchbares übrig bleibt oder Pillow fehlt."""
+    """Figur freistellen (rembg, sonst weißen Hintergrund entfernen) und auf den Inhalt zuschneiden. False, wenn
+    nichts Brauchbares übrig bleibt oder Pillow fehlt."""
     try:
         from PIL import Image
     except ImportError:
@@ -433,11 +433,8 @@ def sprite_freistellen(quelle: Path, ziel: Path) -> bool:
     box = frei.getchannel("A").point(lambda a: 255 if a > 40 else 0).getbbox()
     if not box or (box[2] - box[0]) * (box[3] - box[1]) < 0.02 * bild.width * bild.height:
         return False
-    frei = frei.crop(box)
-    frei.thumbnail(SPRITE_GROESSE, Image.LANCZOS)
-    leinwand = Image.new("RGBA", SPRITE_GROESSE, (0, 0, 0, 0))
-    leinwand.paste(frei, ((SPRITE_GROESSE[0] - frei.width) // 2, (SPRITE_GROESSE[1] - frei.height) // 2), frei)
-    leinwand.save(ziel)
+    # Originalgröße behalten (Wunsch des Nutzers 2026-10-31): nur auf den Inhalt zuschneiden, nicht verkleinern
+    frei.crop(box).save(ziel)
     return True
 
 
